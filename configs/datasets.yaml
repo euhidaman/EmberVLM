@@ -1,0 +1,169 @@
+# EmberVLM Dataset Configuration
+# Data sources and processing settings
+
+# Base Vision-Language Datasets
+base_vlm_datasets:
+  coco_captions:
+    source: "HuggingFaceFW/fineweb"  # Using HuggingFace
+    hf_dataset: "coco_captions"
+    splits:
+      train: "train"
+      val: "val"
+    image_column: "image"
+    caption_column: "caption"
+    max_samples: 118_000
+    subsample_ratio: 0.2
+
+  flickr30k:
+    source: "nlphuji/flickr30k"
+    splits:
+      train: "test"  # Flickr30k uses test split on HF
+    image_column: "image"
+    caption_column: "caption"
+    max_samples: 31_000
+    subsample_ratio: 0.2
+
+  llava_instruct:
+    source: "liuhaotian/LLaVA-Instruct-150K"
+    format: "json"
+    image_column: "image"
+    instruction_column: "conversations"
+    max_samples: 150_000
+    subsample_ratio: 0.2
+
+  vqa_v2:
+    source: "HuggingFaceM4/VQAv2"
+    splits:
+      train: "train"
+      val: "validation"
+      test: "test"
+    image_column: "image"
+    question_column: "question"
+    answer_column: "multiple_choice_answer"
+    max_samples: 650_000
+    subsample_ratio: 0.2
+
+# Incident Reasoning Datasets
+incident_datasets:
+  eccv_train:
+    path: "incidents-dataset/eccv_train.json"
+    format: "json"
+    max_samples: null  # Use all
+
+  eccv_val:
+    path: "incidents-dataset/eccv_val.json"
+    format: "json"
+    max_samples: null
+
+  multi_label_train:
+    path: "incidents-dataset/multi_label_train.json"
+    format: "json"
+    max_samples: null
+
+  multi_label_val:
+    path: "incidents-dataset/multi_label_val.json"
+    format: "json"
+    max_samples: null
+
+# Robot Fleet Selection Dataset
+robot_selection:
+  base_dataset:
+    path: "Multi-Robot-Selection/multi_robot_selection_dataset.json"
+    format: "json"
+
+  augmentation:
+    enabled: true
+    target_samples: 10_000  # Expand to 10K via augmentation
+
+    strategies:
+      parameter_variation:
+        enabled: true
+        multiplier: 30  # Creates ~30x variations
+        variations:
+          weather: ["clear", "rain", "snow", "fog", "wind"]
+          time_of_day: ["day", "night", "dawn", "dusk"]
+          payload_weight: ["light", "medium", "heavy"]
+          terrain: ["flat", "hilly", "rocky", "urban", "forest"]
+          urgency: ["low", "medium", "high", "critical"]
+
+      counterfactual:
+        enabled: true
+        samples_per_original: 3  # 3 wrong choices with explanations
+
+      multi_hop_reasoning:
+        enabled: true
+        max_hops: 3
+
+  validation_split: 0.1
+  test_split: 0.1
+
+# Unified Dataset Format
+unified_format:
+  template: |
+    [System] You are EmberVLM, a robot fleet manager. Analyze the image and task.
+    
+    [Image] {image_features}
+    
+    [Task] {task_description}
+    
+    [Available Robots] {robot_descriptions}
+    
+    [Previous Actions] {context_if_any}
+    
+    [Question] {query}
+    
+    [Assistant] {reasoning_chain} Therefore, the answer is: {final_answer}
+
+  special_tokens:
+    system_start: "<|system|>"
+    system_end: "</|system|>"
+    image_start: "<|image|>"
+    image_end: "</|image|>"
+    user_start: "<|user|>"
+    user_end: "</|user|>"
+    assistant_start: "<|assistant|>"
+    assistant_end: "</|assistant|>"
+    reasoning_start: "<reasoning>"
+    reasoning_end: "</reasoning>"
+    answer_start: "<answer>"
+    answer_end: "</answer>"
+
+# Batch Composition by Stage
+batch_composition:
+  stage1:
+    base_vlm: 1.0
+
+  stage2:
+    base_vlm: 0.6
+    incidents: 0.3
+    robot_selection: 0.1
+
+  stage3:
+    base_vlm: 0.2
+    incidents: 0.3
+    robot_selection: 0.5
+
+# Image Processing
+image_processing:
+  resize: 224
+  normalize:
+    mean: [0.485, 0.456, 0.406]
+    std: [0.229, 0.224, 0.225]
+  augmentation:
+    random_crop: false
+    horizontal_flip: false
+    color_jitter: false
+
+# Data Loading
+dataloader:
+  num_workers: 8
+  pin_memory: true
+  prefetch_factor: 2
+  persistent_workers: true
+
+# Cache Settings
+caching:
+  enabled: true
+  cache_dir: "data/cache"
+  precompute_vision_features: true
+

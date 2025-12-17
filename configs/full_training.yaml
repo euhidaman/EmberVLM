@@ -1,0 +1,96 @@
+# EmberVLM Full Training Configuration
+# Complete configuration for 4-stage training pipeline
+
+# Global settings
+global:
+  seed: 42
+  output_dir: "outputs/embervlm"
+  experiment_name: "embervlm_full_training"
+  mixed_precision: "bf16"
+  gradient_clipping: 1.0
+
+# Include base configs
+include:
+  - base.yaml
+  - training.yaml
+  - datasets.yaml
+
+# Override specific settings for full training
+training:
+  # Hardware (2x A100 80GB)
+  hardware:
+    num_gpus: 2
+    gpu_type: "A100-80GB"
+    distributed_backend: "nccl"
+    use_fsdp: true
+
+  # Monitoring
+  monitoring:
+    wandb:
+      project: "EmberVLM"
+      log_every_n_steps: 10
+      save_every_n_steps: 500
+    codecarbon:
+      enabled: true
+
+  # HuggingFace Hub
+  huggingface:
+    push_to_hub: true
+    hub_model_id: "embervlm/EmberVLM"
+
+# Stage configurations
+stage0_data_prep:
+  enabled: true
+  output_dir: "data/processed"
+
+stage1_alignment:
+  enabled: true
+  num_epochs: 1
+  batch_size_per_gpu: 128
+  gradient_accumulation_steps: 4
+  learning_rate: 3.0e-4
+
+stage2_instruction:
+  enabled: true
+  num_epochs: 2
+  batch_size_per_gpu: 64
+  gradient_accumulation_steps: 4
+  learning_rate: 1.0e-4
+  distillation:
+    enabled: true
+    teacher_model: "Qwen/Qwen-VL-Chat"
+    temperature: 2.0
+
+stage3_reasoning:
+  enabled: true
+  num_epochs: 3
+  batch_size_per_gpu: 32
+  gradient_accumulation_steps: 8
+  learning_rate: 5.0e-5
+  curriculum:
+    epoch_1: "single_robot"
+    epoch_2: "multi_robot"
+    epoch_3: "incident_response"
+  batch_composition:
+    robot_selection: 0.5
+    incident_response: 0.3
+    general_vqa: 0.2
+
+stage4_rlhf:
+  enabled: false  # Optional stage
+
+# Evaluation settings
+evaluation:
+  eval_every_n_steps: 1000
+  benchmarks:
+    robot_selection:
+      enabled: true
+      test_samples: 500
+    incident_response:
+      enabled: true
+
+# Carbon budget
+carbon_budget:
+  max_total_kg_co2: 50
+  alert_threshold_per_hour: 5
+
