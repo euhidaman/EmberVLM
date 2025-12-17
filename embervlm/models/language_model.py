@@ -1,0 +1,698 @@
+"""
+TinyLLM Language Model Backbone for EmberVLM
+
+A lightweight GPT-2 style language model with ~30M parameters,
+optimized for multimodal fusion and edge deployment.
+"""
+
+import math
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from typing import Optional, Tuple, Dict, Any, List, Union
+from dataclasses import dataclass
+
+
+@dataclass
+class TinyLLMConfig:
+    """Configuration for TinyLLM model."""
+
+    vocab_size: int = 50257  # GPT-2 vocabulary
+    hidden_size: int = 768
+    num_hidden_layers: int = 6
+    num_attention_heads: int = 12
+    intermediate_size: int = 3072
+    hidden_act: str = "gelu"
+    hidden_dropout_prob: float = 0.1
+    attention_probs_dropout_prob: float = 0.1
+    max_position_embeddings: int = 1024
+    initializer_range: float = 0.02
+    layer_norm_eps: float = 1e-5
+    use_cache: bool = True
+
+    # Special token IDs
+    bos_token_id: int = 50256
+    eos_token_id: int = 50256
+    pad_token_id: int = 50256
+
+    # Additional config
+    use_qk_norm: bool = True
+    tie_word_embeddings: bool = True
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'vocab_size': self.vocab_size,
+            'hidden_size': self.hidden_size,
+            'num_hidden_layers': self.num_hidden_layers,
+            'num_attention_heads': self.num_attention_heads,
+            'intermediate_size': self.intermediate_size,
+            'hidden_act': self.hidden_act,
+            'hidden_dropout_prob': self.hidden_dropout_prob,
+            'attention_probs_dropout_prob': self.attention_probs_dropout_prob,
+            'max_position_embeddings': self.max_position_embeddings,
+            'initializer_range': self.initializer_range,
+            'layer_norm_eps': self.layer_norm_eps,
+            'use_cache': self.use_cache,
+            'bos_token_id': self.bos_token_id,
+            'eos_token_id': self.eos_token_id,
+            'pad_token_id': self.pad_token_id,
+            'use_qk_norm': self.use_qk_norm,
+            'tie_word_embeddings': self.tie_word_embeddings,
+        }
+
+    @classmethod
+    def from_dict(cls, config_dict: Dict[str, Any]) -> 'TinyLLMConfig':
+        return cls(**{k: v for k, v in config_dict.items() if k in cls.__dataclass_fields__})
+
+
+class QKNorm(nn.Module):
+    """Query-Key normalization for training stability."""
+
+    def __init__(self, hidden_size: int, num_heads: int, eps: float = 1e-5):
+        super().__init__()
+        self.head_dim = hidden_size // num_heads
+        self.q_norm = nn.LayerNorm(self.head_dim, eps=eps)
+        self.k_norm = nn.LayerNorm(self.head_dim, eps=eps)
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Apply normalization to query and key tensors.
+
+        Args:
+            query: [B, num_heads, seq_len, head_dim]
+            key: [B, num_heads, seq_len, head_dim]
+        """
+        query = self.q_norm(query)
+        key = self.k_norm(key)
+        return query, key
+
+
+class TinyAttention(nn.Module):
+    """Multi-head self-attention for TinyLLM."""
+
+    def __init__(self, config: TinyLLMConfig):
+        super().__init__()
+        self.config = config
+        self.hidden_size = config.hidden_size
+        self.num_heads = config.num_attention_heads
+        self.head_dim = self.hidden_size // self.num_heads
+        self.scale = self.head_dim ** -0.5
+
+        assert self.hidden_size % self.num_heads == 0
+
+        # QKV projection
+        self.c_attn = nn.Linear(self.hidden_size, 3 * self.hidden_size)
+        self.c_proj = nn.Linear(self.hidden_size, self.hidden_size)
+
+        # QK Normalization
+        self.use_qk_norm = config.use_qk_norm
+        if self.use_qk_norm:
+            self.qk_norm = QKNorm(self.hidden_size, self.num_heads)
+
+        # Dropout
+        self.attn_dropout = nn.Dropout(config.attention_probs_dropout_prob)
+        self.resid_dropout = nn.Dropout(config.hidden_dropout_prob)
+
+        # Causal mask
+        self.register_buffer(
+            "bias",
+            torch.tril(torch.ones(config.max_position_embeddings, config.max_position_embeddings))
+                .view(1, 1, config.max_position_embeddings, config.max_position_embeddings),
+            persistent=False
+        )
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        past_key_value: Optional[Tuple[torch.Tensor]] = None,
+        use_cache: bool = False,
+        output_attentions: bool = False,
+    ) -> Tuple[torch.Tensor, ...]:
+        """
+        Forward pass for attention layer.
+
+        Args:
+            hidden_states: [B, seq_len, hidden_size]
+            attention_mask: Optional attention mask
+            past_key_value: Optional cached key/value
+            use_cache: Whether to return cached key/value
+            output_attentions: Whether to return attention weights
+        """
+        batch_size, seq_len, _ = hidden_states.size()
+
+        # Compute QKV
+        qkv = self.c_attn(hidden_states)
+        query, key, value = qkv.split(self.hidden_size, dim=2)
+
+        # Reshape to [B, num_heads, seq_len, head_dim]
+        query = query.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        key = key.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        value = value.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+
+        # Handle KV cache
+        if past_key_value is not None:
+            past_key, past_value = past_key_value
+            key = torch.cat([past_key, key], dim=2)
+            value = torch.cat([past_value, value], dim=2)
+
+        if use_cache:
+            present = (key, value)
+        else:
+            present = None
+
+        # Apply QK normalization
+        if self.use_qk_norm:
+            query, key = self.qk_norm(query, key)
+
+        # Compute attention scores
+        attn_weights = torch.matmul(query, key.transpose(-2, -1)) * self.scale
+
+        # Apply causal mask
+        query_length = query.size(2)
+        key_length = key.size(2)
+        causal_mask = self.bias[:, :, key_length - query_length:key_length, :key_length]
+        mask_value = torch.finfo(attn_weights.dtype).min
+        attn_weights = torch.where(causal_mask.bool(), attn_weights, mask_value)
+
+        # Apply attention mask if provided
+        if attention_mask is not None:
+            attn_weights = attn_weights + attention_mask
+
+        # Softmax and dropout
+        attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
+        attn_weights = self.attn_dropout(attn_weights)
+
+        # Compute attention output
+        attn_output = torch.matmul(attn_weights, value)
+        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, self.hidden_size)
+        attn_output = self.c_proj(attn_output)
+        attn_output = self.resid_dropout(attn_output)
+
+        outputs = (attn_output, present)
+        if output_attentions:
+            outputs += (attn_weights,)
+
+        return outputs
+
+
+class TinyMLP(nn.Module):
+    """MLP block for TinyLLM."""
+
+    def __init__(self, config: TinyLLMConfig):
+        super().__init__()
+        self.c_fc = nn.Linear(config.hidden_size, config.intermediate_size)
+        self.c_proj = nn.Linear(config.intermediate_size, config.hidden_size)
+        self.act = nn.GELU()
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        hidden_states = self.c_fc(hidden_states)
+        hidden_states = self.act(hidden_states)
+        hidden_states = self.c_proj(hidden_states)
+        hidden_states = self.dropout(hidden_states)
+        return hidden_states
+
+
+class TinyLLMBlock(nn.Module):
+    """Transformer block for TinyLLM."""
+
+    def __init__(self, config: TinyLLMConfig, layer_idx: int):
+        super().__init__()
+        self.layer_idx = layer_idx
+        self.ln_1 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.attn = TinyAttention(config)
+        self.ln_2 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.mlp = TinyMLP(config)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        past_key_value: Optional[Tuple[torch.Tensor]] = None,
+        use_cache: bool = False,
+        output_attentions: bool = False,
+    ) -> Tuple[torch.Tensor, ...]:
+
+        # Self-attention
+        residual = hidden_states
+        hidden_states = self.ln_1(hidden_states)
+        attn_outputs = self.attn(
+            hidden_states,
+            attention_mask=attention_mask,
+            past_key_value=past_key_value,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+        )
+        attn_output = attn_outputs[0]
+        outputs = attn_outputs[1:]
+        hidden_states = residual + attn_output
+
+        # MLP
+        residual = hidden_states
+        hidden_states = self.ln_2(hidden_states)
+        mlp_output = self.mlp(hidden_states)
+        hidden_states = residual + mlp_output
+
+        return (hidden_states,) + outputs
+
+
+class TinyLLM(nn.Module):
+    """
+    TinyLLM - A lightweight GPT-2 style language model.
+
+    ~30M parameters optimized for multimodal fusion.
+    """
+
+    def __init__(self, config: TinyLLMConfig):
+        super().__init__()
+        self.config = config
+
+        # Embeddings
+        self.wte = nn.Embedding(config.vocab_size, config.hidden_size)
+        self.wpe = nn.Embedding(config.max_position_embeddings, config.hidden_size)
+        self.drop = nn.Dropout(config.hidden_dropout_prob)
+
+        # Transformer blocks
+        self.h = nn.ModuleList([
+            TinyLLMBlock(config, i) for i in range(config.num_hidden_layers)
+        ])
+
+        # Final layer norm
+        self.ln_f = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+
+        # Initialize weights
+        self.apply(self._init_weights)
+
+        # Apply special scaled init to residual projections
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                nn.init.normal_(p, mean=0.0, std=config.initializer_range / math.sqrt(2 * config.num_hidden_layers))
+
+    def _init_weights(self, module: nn.Module):
+        if isinstance(module, nn.Linear):
+            nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
+        elif isinstance(module, nn.LayerNorm):
+            nn.init.ones_(module.weight)
+            nn.init.zeros_(module.bias)
+
+    def get_input_embeddings(self) -> nn.Embedding:
+        return self.wte
+
+    def set_input_embeddings(self, new_embeddings: nn.Embedding):
+        self.wte = new_embeddings
+
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        attention_mask: Optional[torch.FloatTensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[List[Tuple[torch.Tensor]]] = None,
+        use_cache: bool = False,
+        output_attentions: bool = False,
+        output_hidden_states: bool = False,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Forward pass through TinyLLM.
+
+        Args:
+            input_ids: Token IDs [B, seq_len]
+            inputs_embeds: Input embeddings [B, seq_len, hidden_size]
+            attention_mask: Attention mask [B, seq_len]
+            position_ids: Position IDs [B, seq_len]
+            past_key_values: Cached key/values for generation
+            use_cache: Whether to return cached key/values
+            output_attentions: Whether to return attention weights
+            output_hidden_states: Whether to return all hidden states
+        """
+        if input_ids is not None and inputs_embeds is not None:
+            raise ValueError("Cannot specify both input_ids and inputs_embeds")
+
+        if input_ids is not None:
+            batch_size, seq_len = input_ids.size()
+            inputs_embeds = self.wte(input_ids)
+        elif inputs_embeds is not None:
+            batch_size, seq_len, _ = inputs_embeds.size()
+        else:
+            raise ValueError("Must specify either input_ids or inputs_embeds")
+
+        # Handle past key values
+        past_length = 0
+        if past_key_values is not None:
+            past_length = past_key_values[0][0].size(2)
+
+        # Position IDs
+        if position_ids is None:
+            position_ids = torch.arange(
+                past_length, past_length + seq_len,
+                dtype=torch.long, device=inputs_embeds.device
+            )
+            position_ids = position_ids.unsqueeze(0).expand(batch_size, -1)
+
+        # Position embeddings
+        position_embeds = self.wpe(position_ids)
+        hidden_states = inputs_embeds + position_embeds
+        hidden_states = self.drop(hidden_states)
+
+        # Prepare attention mask
+        if attention_mask is not None:
+            attention_mask = attention_mask[:, None, None, :]
+            attention_mask = (1.0 - attention_mask) * torch.finfo(hidden_states.dtype).min
+
+        # Forward through transformer blocks
+        presents = () if use_cache else None
+        all_hidden_states = () if output_hidden_states else None
+        all_attentions = () if output_attentions else None
+
+        for i, block in enumerate(self.h):
+            if output_hidden_states:
+                all_hidden_states += (hidden_states,)
+
+            past_key_value = past_key_values[i] if past_key_values is not None else None
+
+            outputs = block(
+                hidden_states,
+                attention_mask=attention_mask,
+                past_key_value=past_key_value,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+            )
+
+            hidden_states = outputs[0]
+
+            if use_cache:
+                presents += (outputs[1],)
+
+            if output_attentions:
+                all_attentions += (outputs[2] if len(outputs) > 2 else outputs[-1],)
+
+        # Final layer norm
+        hidden_states = self.ln_f(hidden_states)
+
+        if output_hidden_states:
+            all_hidden_states += (hidden_states,)
+
+        return {
+            'last_hidden_state': hidden_states,
+            'past_key_values': presents,
+            'hidden_states': all_hidden_states,
+            'attentions': all_attentions,
+        }
+
+
+class TinyLLMForCausalLM(nn.Module):
+    """TinyLLM with causal language modeling head."""
+
+    def __init__(self, config: TinyLLMConfig):
+        super().__init__()
+        self.config = config
+        self.transformer = TinyLLM(config)
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+
+        # Tie weights
+        if config.tie_word_embeddings:
+            self.lm_head.weight = self.transformer.wte.weight
+
+    def get_input_embeddings(self) -> nn.Embedding:
+        return self.transformer.wte
+
+    def set_input_embeddings(self, new_embeddings: nn.Embedding):
+        self.transformer.wte = new_embeddings
+
+    def get_output_embeddings(self) -> nn.Linear:
+        return self.lm_head
+
+    def set_output_embeddings(self, new_embeddings: nn.Linear):
+        self.lm_head = new_embeddings
+
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        attention_mask: Optional[torch.FloatTensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[List[Tuple[torch.Tensor]]] = None,
+        use_cache: bool = False,
+        output_attentions: bool = False,
+        output_hidden_states: bool = False,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Forward pass with optional language modeling loss.
+
+        Args:
+            labels: Target token IDs for computing loss
+        """
+        outputs = self.transformer(
+            input_ids=input_ids,
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+        )
+
+        hidden_states = outputs['last_hidden_state']
+        logits = self.lm_head(hidden_states)
+
+        loss = None
+        if labels is not None:
+            # Shift for causal LM
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+
+            loss = F.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1),
+                ignore_index=-100,
+            )
+
+        return {
+            'loss': loss,
+            'logits': logits,
+            'past_key_values': outputs['past_key_values'],
+            'hidden_states': outputs['hidden_states'],
+            'attentions': outputs['attentions'],
+            'last_hidden_state': hidden_states,
+        }
+
+    @torch.no_grad()
+    def generate(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        attention_mask: Optional[torch.FloatTensor] = None,
+        max_new_tokens: int = 50,
+        temperature: float = 1.0,
+        top_k: int = 50,
+        top_p: float = 0.9,
+        do_sample: bool = True,
+        eos_token_id: Optional[int] = None,
+        pad_token_id: Optional[int] = None,
+    ) -> torch.LongTensor:
+        """
+        Generate text autoregressively.
+
+        Args:
+            max_new_tokens: Maximum number of tokens to generate
+            temperature: Sampling temperature
+            top_k: Top-k sampling
+            top_p: Top-p (nucleus) sampling
+            do_sample: Whether to sample or use greedy decoding
+        """
+        if eos_token_id is None:
+            eos_token_id = self.config.eos_token_id
+        if pad_token_id is None:
+            pad_token_id = self.config.pad_token_id
+
+        # Handle inputs_embeds by running first forward pass
+        if inputs_embeds is not None and input_ids is None:
+            outputs = self.forward(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                use_cache=True,
+            )
+            logits = outputs['logits']
+            past_key_values = outputs['past_key_values']
+
+            # Get first token
+            next_token_logits = logits[:, -1, :] / temperature
+
+            if do_sample:
+                if top_k > 0:
+                    indices_to_remove = next_token_logits < torch.topk(next_token_logits, top_k)[0][..., -1, None]
+                    next_token_logits[indices_to_remove] = float('-inf')
+
+                if top_p < 1.0:
+                    sorted_logits, sorted_indices = torch.sort(next_token_logits, descending=True)
+                    cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                    sorted_indices_to_remove = cumulative_probs > top_p
+                    sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                    sorted_indices_to_remove[..., 0] = 0
+                    indices_to_remove = sorted_indices_to_remove.scatter(-1, sorted_indices, sorted_indices_to_remove)
+                    next_token_logits[indices_to_remove] = float('-inf')
+
+                probs = F.softmax(next_token_logits, dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1)
+            else:
+                next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+
+            generated = next_token
+            batch_size = inputs_embeds.size(0)
+        else:
+            generated = input_ids
+            past_key_values = None
+            batch_size = input_ids.size(0)
+
+        # Generate remaining tokens
+        for _ in range(max_new_tokens - 1):
+            if past_key_values is not None:
+                # Only use last token when using cache
+                model_input = generated[:, -1:]
+            else:
+                model_input = generated
+
+            outputs = self.forward(
+                input_ids=model_input,
+                past_key_values=past_key_values,
+                use_cache=True,
+            )
+
+            next_token_logits = outputs['logits'][:, -1, :] / temperature
+            past_key_values = outputs['past_key_values']
+
+            if do_sample:
+                if top_k > 0:
+                    indices_to_remove = next_token_logits < torch.topk(next_token_logits, top_k)[0][..., -1, None]
+                    next_token_logits[indices_to_remove] = float('-inf')
+
+                if top_p < 1.0:
+                    sorted_logits, sorted_indices = torch.sort(next_token_logits, descending=True)
+                    cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                    sorted_indices_to_remove = cumulative_probs > top_p
+                    sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                    sorted_indices_to_remove[..., 0] = 0
+                    indices_to_remove = sorted_indices_to_remove.scatter(-1, sorted_indices, sorted_indices_to_remove)
+                    next_token_logits[indices_to_remove] = float('-inf')
+
+                probs = F.softmax(next_token_logits, dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1)
+            else:
+                next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+
+            generated = torch.cat([generated, next_token], dim=1)
+
+            # Check for EOS
+            if (next_token == eos_token_id).all():
+                break
+
+        return generated
+
+
+class TinyLLMBackbone(nn.Module):
+    """
+    TinyLLM Backbone wrapper for EmberVLM.
+
+    Provides interface for multimodal fusion with the language model.
+    """
+
+    def __init__(
+        self,
+        config: Optional[TinyLLMConfig] = None,
+        freeze_base: bool = True,
+        unfreeze_last_layer: bool = True,
+    ):
+        super().__init__()
+
+        if config is None:
+            config = TinyLLMConfig()
+
+        self.config = config
+        self.model = TinyLLMForCausalLM(config)
+
+        # Freeze/unfreeze parameters
+        if freeze_base:
+            self._freeze_base()
+
+        if unfreeze_last_layer:
+            self._unfreeze_last_layer()
+
+    def _freeze_base(self):
+        """Freeze all parameters."""
+        for param in self.model.parameters():
+            param.requires_grad = False
+
+    def _unfreeze_last_layer(self):
+        """Unfreeze the last transformer layer."""
+        for param in self.model.transformer.h[-1].parameters():
+            param.requires_grad = True
+        for param in self.model.transformer.ln_f.parameters():
+            param.requires_grad = True
+        for param in self.model.lm_head.parameters():
+            param.requires_grad = True
+
+    def get_input_embeddings(self) -> nn.Embedding:
+        return self.model.get_input_embeddings()
+
+    def set_input_embeddings(self, new_embeddings: nn.Embedding):
+        self.model.set_input_embeddings(new_embeddings)
+
+    def embed_tokens(self, input_ids: torch.LongTensor) -> torch.FloatTensor:
+        """Get token embeddings."""
+        return self.model.transformer.wte(input_ids)
+
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        attention_mask: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[List[Tuple[torch.Tensor]]] = None,
+        use_cache: bool = False,
+        output_attentions: bool = False,
+        output_hidden_states: bool = False,
+    ) -> Dict[str, torch.Tensor]:
+        """Forward pass through the language model."""
+        return self.model(
+            input_ids=input_ids,
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            labels=labels,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+        )
+
+    @torch.no_grad()
+    def generate(self, **kwargs) -> torch.LongTensor:
+        """Generate text."""
+        return self.model.generate(**kwargs)
+
+    def get_hidden_size(self) -> int:
+        """Return hidden size."""
+        return self.config.hidden_size
+
+    def get_vocab_size(self) -> int:
+        """Return vocabulary size."""
+        return self.config.vocab_size
+
+    @property
+    def device(self) -> torch.device:
+        return next(self.parameters()).device
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return next(self.parameters()).dtype
+

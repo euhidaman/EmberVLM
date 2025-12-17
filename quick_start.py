@@ -1,178 +1,207 @@
-#!/usr/bin/env python3
 """
-EmberVLM Quick Start Example
-Demonstrates basic model usage for robot selection and incident response.
+EmberVLM Quick Start Script
+
+Simple script to get started with EmberVLM.
 """
 
+import os
 import sys
-from pathlib import Path
 
-# Add project to path
-sys.path.insert(0, str(Path(__file__).parent))
+# Add embervlm to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
+from transformers import AutoTokenizer
 
 
-def test_model_creation():
-    """Test basic model creation."""
-    print("=" * 50)
-    print("EmberVLM Quick Start")
-    print("=" * 50)
+def create_model():
+    """Create EmberVLM model."""
+    from embervlm.models import EmberVLM, EmberVLMConfig
 
-    from models import EmberVLM, EmberVLMConfig
-
-    # Create model with default config
-    print("\n1. Creating EmberVLM model...")
     config = EmberVLMConfig(
-        vision_pretrained=False,  # Don't download pretrained for test
-        vision_frozen=True,
-        num_vision_tokens=8,
-        hidden_size=768,
-        num_layers=6,
-        freeze_lm_layers=[0, 1, 2, 3],
-        trainable_lm_layers=[4, 5]
+        vision_model="repvit_xxs",
+        vision_pretrained=False,  # Set True to download pretrained weights
+        freeze_vision=True,
+        num_visual_tokens=8,
+        vision_output_dim=384,
+        language_hidden_size=768,
+        language_num_layers=6,
+        language_num_heads=12,
+        language_vocab_size=50257,
+        reasoning_enabled=True,
     )
 
     model = EmberVLM(config)
-    print("   Model created successfully!")
 
     # Print model info
-    param_counts = model.count_parameters()
-    print("\n2. Model Statistics:")
-    for component, (total, trainable) in param_counts.items():
-        print(f"   {component}: {total:,} total, {trainable:,} trainable")
+    params = model.count_parameters()
+    print(f"Model created!")
+    print(f"  Total parameters: {params['total']:,}")
+    print(f"  Trainable parameters: {params['trainable']:,}")
+    print(f"  Vision encoder: {params['vision_encoder']:,}")
+    print(f"  Language model: {params['language_model']:,}")
+    print(f"  Fusion module: {params['fusion_module']:,}")
 
-    # Test forward pass
-    print("\n3. Testing forward pass...")
-    batch_size = 2
-    pixel_values = torch.randn(batch_size, 3, 224, 224)
-    input_ids = torch.randint(0, 50257, (batch_size, 32))
-    attention_mask = torch.ones_like(input_ids)
-
-    with torch.no_grad():
-        outputs = model(
-            pixel_values=pixel_values,
-            input_ids=input_ids,
-            attention_mask=attention_mask
-        )
-
-    print(f"   Input image shape: {pixel_values.shape}")
-    print(f"   Input text shape: {input_ids.shape}")
-    print(f"   Output logits shape: {outputs['logits'].shape}")
-    print("   Forward pass successful!")
+    if 'reasoning_module' in params:
+        print(f"  Reasoning module: {params['reasoning_module']:,}")
 
     return model
 
 
-def test_robot_selection():
-    """Test robot selection dataset and prompts."""
-    print("\n4. Testing Robot Selection...")
+def create_tokenizer():
+    """Create tokenizer with special tokens."""
+    tokenizer = AutoTokenizer.from_pretrained('gpt2')
+    tokenizer.pad_token = tokenizer.eos_token
 
-    from data import RobotSelectionDataset, get_robot_descriptions_string
+    # Add special tokens
+    special_tokens = {
+        'additional_special_tokens': [
+            '<|reasoning_start|>',
+            '<|reasoning_end|>',
+            '<|robot_selection|>',
+            '<|action_plan|>',
+            '<|image|>',
+        ]
+    }
+    tokenizer.add_special_tokens(special_tokens)
 
-    # Print robot descriptions
-    print("   Available robots:")
-    for line in get_robot_descriptions_string().split('\n')[:5]:
-        if line.strip():
-            print(f"   {line}")
-    print("   ...")
+    print(f"Tokenizer created with {len(tokenizer)} tokens")
 
-    # Check if dataset exists
-    dataset_path = Path("Multi-Robot-Selection/multi_robot_selection_dataset.json")
-    if dataset_path.exists():
-        dataset = RobotSelectionDataset(
-            data_path=str(dataset_path),
-            split="train",
-            augment=False,
-            max_samples=10
+    return tokenizer
+
+
+def test_forward_pass(model, tokenizer):
+    """Test model forward pass."""
+    print("\nTesting forward pass...")
+
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    model = model.to(device)
+    model.eval()
+
+    # Create dummy inputs
+    batch_size = 2
+    seq_len = 64
+
+    input_ids = torch.randint(0, len(tokenizer), (batch_size, seq_len), device=device)
+    pixel_values = torch.randn(batch_size, 3, 224, 224, device=device)
+    attention_mask = torch.ones(batch_size, seq_len, dtype=torch.long, device=device)
+
+    # Forward pass
+    with torch.no_grad():
+        outputs = model(
+            input_ids=input_ids,
+            pixel_values=pixel_values,
+            attention_mask=attention_mask,
+            return_reasoning=True,
         )
-        print(f"   Loaded {len(dataset)} robot selection samples")
 
-        # Show first sample
-        sample = dataset[0]
-        print(f"   Sample task: {sample['task'][:50]}...")
-        print(f"   Selected robots: {sample['selected_robots']}")
-    else:
-        print("   Dataset not found at expected path")
+    print(f"Forward pass successful!")
+    print(f"  Logits shape: {outputs['logits'].shape}")
 
-    print("   Robot selection test complete!")
+    if 'robot_logits' in outputs and outputs['robot_logits'] is not None:
+        print(f"  Robot logits shape: {outputs['robot_logits'].shape}")
 
+    if 'robot_probs' in outputs and outputs['robot_probs'] is not None:
+        print(f"  Robot probabilities: {outputs['robot_probs'][0].tolist()}")
 
-def test_incident_response():
-    """Test incident response functionality."""
-    print("\n5. Testing Incident Response...")
-
-    from data import INCIDENT_TYPES, ROBOT_RECOMMENDATIONS
-
-    print("   Supported incident types:")
-    for itype in list(INCIDENT_TYPES.keys())[:4]:
-        rec = ROBOT_RECOMMENDATIONS.get(itype, {})
-        print(f"   - {itype}: primary={rec.get('primary', 'N/A')}")
-    print("   ...")
-
-    print("   Incident response test complete!")
+    return True
 
 
-def test_pi_runtime():
-    """Test Raspberry Pi inference runtime."""
-    print("\n6. Testing Pi Runtime...")
+def test_generation(model, tokenizer):
+    """Test text generation."""
+    print("\nTesting generation...")
 
-    from deployment import EmberVLMPiRuntime
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    model = model.to(device)
+    model.eval()
 
-    runtime = EmberVLMPiRuntime(use_rules_fallback=True)
+    # Create inputs
+    prompt = "Analyze this incident scene and select a robot."
+    tokens = tokenizer(prompt, return_tensors='pt', padding=True)
+    input_ids = tokens['input_ids'].to(device)
 
-    # Test robot selection
-    result = runtime.select_robot(
-        task_description="Inspect a building exterior for damage"
-    )
+    pixel_values = torch.randn(1, 3, 224, 224, device=device)
 
-    print(f"   Task: Inspect building")
-    print(f"   Selected: {', '.join(result['selected_robots'])}")
-    print(f"   Confidence: {result['confidence']*100:.1f}%")
-    print(f"   Inference time: {result['inference_time_ms']:.1f} ms")
+    # Generate
+    with torch.no_grad():
+        generated = model.generate(
+            input_ids=input_ids,
+            pixel_values=pixel_values,
+            max_new_tokens=20,
+            temperature=0.8,
+            do_sample=True,
+        )
 
-    # Test incident response
-    incident = runtime.plan_incident_response(
-        incident_type="fire",
-        description="Building fire in commercial district"
-    )
+    generated_text = tokenizer.decode(generated[0], skip_special_tokens=True)
+    print(f"Generated text: {generated_text[:100]}...")
 
-    print(f"\n   Incident: {incident['incident_type']}")
-    print(f"   Primary robot: {incident['primary_robot']}")
+    return True
 
-    print("   Pi runtime test complete!")
+
+def test_robot_selection(model, tokenizer):
+    """Test robot selection functionality."""
+    print("\nTesting robot selection...")
+
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    model = model.to(device)
+    model.eval()
+
+    pixel_values = torch.randn(1, 3, 224, 224, device=device)
+
+    # Use analyze_incident
+    with torch.no_grad():
+        result = model.analyze_incident(
+            pixel_values=pixel_values,
+            instruction="Survey damage from aerial perspective after earthquake",
+            tokenizer=tokenizer,
+        )
+
+    print(f"Robot selection result:")
+    print(f"  Selected robot: {result['selected_robot']}")
+    print(f"  Confidence: {result['confidence']:.2%}")
+    print(f"  Robot probabilities: {result['robot_probabilities']}")
+
+    return True
 
 
 def main():
-    """Run all quick start tests."""
+    """Main quick start demo."""
+    print("=" * 60)
+    print("EmberVLM Quick Start")
+    print("=" * 60)
+
+    # Create model and tokenizer
+    model = create_model()
+    tokenizer = create_tokenizer()
+
+    # Resize embeddings for special tokens
+    model.language_model.model.resize_token_embeddings(len(tokenizer))
+
+    # Run tests
     try:
-        # Test model
-        model = test_model_creation()
+        test_forward_pass(model, tokenizer)
+        test_generation(model, tokenizer)
+        test_robot_selection(model, tokenizer)
 
-        # Test robot selection
-        test_robot_selection()
-
-        # Test incident response
-        test_incident_response()
-
-        # Test Pi runtime
-        test_pi_runtime()
-
-        print("\n" + "=" * 50)
+        print("\n" + "=" * 60)
         print("All tests passed! EmberVLM is ready to use.")
-        print("=" * 50)
+        print("=" * 60)
+
         print("\nNext steps:")
-        print("1. Install dependencies: pip install -r requirements.txt")
-        print("2. Run training: python scripts/train_all_stages.py --config configs/training.yaml")
-        print("3. Deploy on Pi: python deployment/pi_inference.py --interactive")
+        print("1. Prepare training data in the expected format")
+        print("2. Run training: python scripts/train_all.py --output_dir ./outputs")
+        print("3. Evaluate: python scripts/evaluate.py --model_path ./outputs/final")
+        print("4. Deploy: python scripts/deploy.py package --model_path ./outputs/final")
 
     except Exception as e:
-        print(f"\nError: {e}")
-        print("\nMake sure to install dependencies:")
-        print("  pip install -r requirements.txt")
-        raise
+        print(f"\nError during testing: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    exit(main())
 

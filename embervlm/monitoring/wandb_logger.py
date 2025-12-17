@@ -1,0 +1,374 @@
+"""
+Weights & Biases Logger for EmberVLM
+
+Provides comprehensive logging for training metrics,
+model artifacts, and visualizations.
+"""
+
+import os
+from typing import Optional, Dict, Any, List, Union
+from pathlib import Path
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+class WandbLogger:
+    """
+    Weights & Biases logger for EmberVLM training.
+
+    Features:
+    - Training metrics logging
+    - Model checkpointing
+    - Gradient visualization
+    - Attention heatmaps
+    - Custom dashboards
+    """
+
+    def __init__(
+        self,
+        project: str = "embervlm",
+        name: Optional[str] = None,
+        config: Optional[Dict[str, Any]] = None,
+        entity: Optional[str] = None,
+        resume: bool = False,
+        tags: Optional[List[str]] = None,
+        notes: Optional[str] = None,
+        mode: str = "online",
+    ):
+        self.project = project
+        self.name = name
+        self.config = config or {}
+        self.entity = entity
+        self.enabled = True
+
+        try:
+            import wandb
+            self.wandb = wandb
+
+            # Initialize run
+            self.run = wandb.init(
+                project=project,
+                name=name,
+                config=config,
+                entity=entity,
+                resume="allow" if resume else None,
+                tags=tags,
+                notes=notes,
+                mode=mode,
+            )
+
+            logger.info(f"Initialized W&B run: {self.run.name}")
+
+        except ImportError:
+            logger.warning("wandb not installed. Logging disabled.")
+            self.wandb = None
+            self.run = None
+            self.enabled = False
+        except Exception as e:
+            logger.warning(f"Failed to initialize W&B: {e}")
+            self.wandb = None
+            self.run = None
+            self.enabled = False
+
+    def log(
+        self,
+        metrics: Dict[str, Any],
+        step: Optional[int] = None,
+        commit: bool = True,
+    ):
+        """
+        Log metrics to W&B.
+
+        Args:
+            metrics: Dictionary of metric names and values
+            step: Training step (optional)
+            commit: Whether to commit the log
+        """
+        if not self.enabled:
+            return
+
+        try:
+            self.wandb.log(metrics, step=step, commit=commit)
+        except Exception as e:
+            logger.warning(f"Failed to log to W&B: {e}")
+
+    def log_image(
+        self,
+        key: str,
+        images: Union[List, Any],
+        caption: Optional[str] = None,
+        step: Optional[int] = None,
+    ):
+        """Log images to W&B."""
+        if not self.enabled:
+            return
+
+        try:
+            if isinstance(images, list):
+                wandb_images = [
+                    self.wandb.Image(img, caption=caption)
+                    for img in images
+                ]
+            else:
+                wandb_images = self.wandb.Image(images, caption=caption)
+
+            self.wandb.log({key: wandb_images}, step=step)
+        except Exception as e:
+            logger.warning(f"Failed to log images: {e}")
+
+    def log_attention_map(
+        self,
+        key: str,
+        attention_weights: Any,
+        step: Optional[int] = None,
+    ):
+        """
+        Log attention heatmap visualization.
+
+        Args:
+            key: Metric key name
+            attention_weights: Attention tensor [B, H, T, T] or [H, T, T]
+            step: Training step
+        """
+        if not self.enabled:
+            return
+
+        try:
+            import matplotlib.pyplot as plt
+            import numpy as np
+
+            # Convert to numpy
+            if hasattr(attention_weights, 'cpu'):
+                attn = attention_weights.cpu().detach().numpy()
+            else:
+                attn = np.array(attention_weights)
+
+            # Average over batch and heads if needed
+            if attn.ndim == 4:
+                attn = attn[0].mean(axis=0)  # [T, T]
+            elif attn.ndim == 3:
+                attn = attn.mean(axis=0)  # [T, T]
+
+            # Create heatmap
+            fig, ax = plt.subplots(figsize=(8, 8))
+            im = ax.imshow(attn, cmap='viridis')
+            ax.set_xlabel('Key Position')
+            ax.set_ylabel('Query Position')
+            ax.set_title('Attention Weights')
+            plt.colorbar(im, ax=ax)
+
+            self.wandb.log({key: self.wandb.Image(fig)}, step=step)
+            plt.close(fig)
+
+        except Exception as e:
+            logger.warning(f"Failed to log attention map: {e}")
+
+    def log_gradient_histogram(
+        self,
+        model: Any,
+        step: Optional[int] = None,
+    ):
+        """Log gradient histograms for model parameters."""
+        if not self.enabled:
+            return
+
+        try:
+            gradients = {}
+            for name, param in model.named_parameters():
+                if param.grad is not None:
+                    grad = param.grad.cpu().detach()
+                    gradients[f"gradients/{name}"] = self.wandb.Histogram(grad.numpy())
+
+            self.wandb.log(gradients, step=step)
+        except Exception as e:
+            logger.warning(f"Failed to log gradients: {e}")
+
+    def log_model(
+        self,
+        model_path: str,
+        name: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ):
+        """
+        Log model checkpoint as artifact.
+
+        Args:
+            model_path: Path to saved model
+            name: Artifact name
+            metadata: Additional metadata
+        """
+        if not self.enabled:
+            return
+
+        try:
+            artifact = self.wandb.Artifact(
+                name=name or "model",
+                type="model",
+                metadata=metadata,
+            )
+            artifact.add_file(model_path)
+            self.run.log_artifact(artifact)
+            logger.info(f"Logged model artifact: {name}")
+        except Exception as e:
+            logger.warning(f"Failed to log model: {e}")
+
+    def log_table(
+        self,
+        key: str,
+        columns: List[str],
+        data: List[List[Any]],
+        step: Optional[int] = None,
+    ):
+        """Log tabular data."""
+        if not self.enabled:
+            return
+
+        try:
+            table = self.wandb.Table(columns=columns, data=data)
+            self.wandb.log({key: table}, step=step)
+        except Exception as e:
+            logger.warning(f"Failed to log table: {e}")
+
+    def log_confusion_matrix(
+        self,
+        key: str,
+        y_true: List[int],
+        y_pred: List[int],
+        class_names: List[str],
+        step: Optional[int] = None,
+    ):
+        """Log confusion matrix."""
+        if not self.enabled:
+            return
+
+        try:
+            self.wandb.log({
+                key: self.wandb.plot.confusion_matrix(
+                    probs=None,
+                    y_true=y_true,
+                    preds=y_pred,
+                    class_names=class_names,
+                )
+            }, step=step)
+        except Exception as e:
+            logger.warning(f"Failed to log confusion matrix: {e}")
+
+    def define_metric(
+        self,
+        name: str,
+        step_metric: str = "step",
+        summary: str = "best",
+        goal: str = "maximize",
+    ):
+        """Define custom metric with summary."""
+        if not self.enabled:
+            return
+
+        try:
+            self.wandb.define_metric(
+                name,
+                step_metric=step_metric,
+                summary=summary,
+                goal=goal,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to define metric: {e}")
+
+    def watch(
+        self,
+        model: Any,
+        log: str = "gradients",
+        log_freq: int = 100,
+    ):
+        """Watch model for automatic gradient logging."""
+        if not self.enabled:
+            return
+
+        try:
+            self.wandb.watch(model, log=log, log_freq=log_freq)
+        except Exception as e:
+            logger.warning(f"Failed to watch model: {e}")
+
+    def alert(
+        self,
+        title: str,
+        text: str,
+        level: str = "INFO",
+    ):
+        """Send alert."""
+        if not self.enabled:
+            return
+
+        try:
+            level_map = {
+                "INFO": self.wandb.AlertLevel.INFO,
+                "WARN": self.wandb.AlertLevel.WARN,
+                "ERROR": self.wandb.AlertLevel.ERROR,
+            }
+            self.wandb.alert(
+                title=title,
+                text=text,
+                level=level_map.get(level, self.wandb.AlertLevel.INFO),
+            )
+        except Exception as e:
+            logger.warning(f"Failed to send alert: {e}")
+
+    def finish(self):
+        """Finish the W&B run."""
+        if not self.enabled:
+            return
+
+        try:
+            self.run.finish()
+            logger.info("W&B run finished")
+        except Exception as e:
+            logger.warning(f"Failed to finish W&B run: {e}")
+
+    @property
+    def url(self) -> Optional[str]:
+        """Get run URL."""
+        if self.run:
+            return self.run.url
+        return None
+
+
+def create_training_dashboard(
+    logger: WandbLogger,
+    stages: List[str] = None,
+):
+    """
+    Configure W&B dashboard for training.
+
+    Args:
+        logger: WandbLogger instance
+        stages: Training stages to track
+    """
+    if not logger.enabled:
+        return
+
+    stages = stages or ['stage1', 'stage2', 'stage3', 'stage4']
+
+    # Define metrics
+    metrics = [
+        ('loss', 'minimize'),
+        ('accuracy', 'maximize'),
+        ('robot_accuracy', 'maximize'),
+        ('lr', 'last'),
+    ]
+
+    for metric, goal in metrics:
+        logger.define_metric(
+            metric,
+            summary='best' if goal != 'last' else 'last',
+            goal=goal if goal != 'last' else 'maximize',
+        )
+
+    # Validation metrics
+    for stage in stages:
+        logger.define_metric(
+            f'{stage}/val_loss',
+            summary='min',
+            goal='minimize',
+        )
+
