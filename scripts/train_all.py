@@ -4,7 +4,7 @@ EmberVLM Master Training Script
 Orchestrates all four training stages:
 1. Visual-Language Alignment
 2. Multimodal Instruction Tuning
-3. Incident Understanding & Robot Reasoning
+3. Robot Fleet Selection Training
 4. Chain-of-Thought Reasoning Integration
 """
 

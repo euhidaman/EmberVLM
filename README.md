@@ -6,7 +6,7 @@
 [![HuggingFace](https://img.shields.io/badge/HuggingFace-Models-orange.svg)](https://huggingface.co/)
 [![CodeCarbon](https://img.shields.io/badge/CodeCarbon-Tracked-green.svg)](https://codecarbon.io/)
 
-An ultra-efficient multimodal Vision-Language Model for robot fleet selection and incident response, deployable on Raspberry Pi Zero with less than 100MB memory footprint. EmberVLM combines a frozen RepViT-XXS vision encoder with a TinyLLM-30M language backbone, achieving state-of-the-art efficiency for edge deployment while maintaining competitive performance on incident analysis and robot selection tasks.
+An ultra-efficient multimodal Vision-Language Model for robot fleet selection, deployable on Raspberry Pi Zero with less than 100MB memory footprint. EmberVLM combines a frozen RepViT-XXS vision encoder with a pretrained TinyLLM-30M language backbone (tinyllm/30M-0.4), achieving state-of-the-art efficiency for edge deployment while maintaining competitive performance on robot selection tasks.
 
 ---
 
@@ -39,16 +39,16 @@ An ultra-efficient multimodal Vision-Language Model for robot fleet selection an
 
 - **Ultra-Lightweight Architecture**: 35.2M total parameters with only 5.1M trainable
 - **Robot Fleet Selection**: Intelligent selection from 5 robot types (Drone, Humanoid, Wheeled, Legged, Underwater)
-- **Incident Analysis**: Specialized for emergency and disaster response scenarios
+- **Visual Scene Understanding**: General visual understanding from diverse image datasets
 - **Chain-of-Thought Reasoning**: Step-by-step reasoning for transparent decision-making
 - **Edge Deployment**: Optimized for Raspberry Pi Zero with <85MB RAM usage
 
 ### Technical Innovations
 
 - **Frozen Vision Encoder**: RepViT-XXS outputs 8 visual tokens via adaptive pooling (384-dim)
+- **Pretrained Language Model**: tinyllm/30M-0.4 from HuggingFace (trained on FineWeb + SHL sensor data)
 - **Lightweight Fusion Module**: Adapter-based design with 48-dim bottleneck (<500K parameters)
-- **Four-Stage Progressive Training**: Alignment, Instruction Tuning, Incident Specialization, Reasoning
-- **Knowledge Distillation**: Teacher-student learning from Qwen-VL-Chat
+- **Four-Stage Progressive Training**: Alignment, Instruction Tuning, Robot Selection, Reasoning
 - **QK-Normalization**: Improved training stability in fusion layers
 
 ### Deployment Advantages
@@ -180,7 +180,7 @@ python quick_start.py
 
 ## Dataset Setup
 
-> **Warning**: Ensure you have at least 100GB of free disk space before downloading all datasets. The full Incidents1M dataset alone requires approximately 50GB.
+> **Warning**: Ensure you have at least 100GB of free disk space before downloading all datasets.
 
 ### Dataset Overview
 
@@ -190,7 +190,6 @@ python quick_start.py
 | Flickr30k | ~5GB | Stage 1: Vision-Language Alignment | Yes |
 | LLaVA-Instruct-150K | ~10GB | Stage 2: Instruction Tuning | Yes |
 | VQA v2 | ~15GB | Stage 2: Instruction Tuning | Recommended |
-| Incidents1M | ~50GB | Stage 3: Incident Specialization | Yes |
 | Robot Selection | ~1MB | Stage 3: Robot Selection Training | Yes |
 
 ### Step 1: Download Base VLM Datasets
@@ -226,49 +225,7 @@ ls -la ../data/base_vlm/
 # Expected: coco/, vqa/, llava_instruct/, flickr30k/
 ```
 
-### Step 2: Set Up Incidents Dataset
-
-The Incidents1M dataset annotations are included in the repository. You need to download the images:
-
-```bash
-# Return to project root
-cd ..
-
-# Download incident images (this may take several hours)
-python download-scripts/download_incidents_images.py \
-    --annotations-dir incidents-dataset \
-    --output-dir data/incidents_images \
-    --num-workers 8
-
-# For a smaller subset (10,000 images for testing)
-python download-scripts/download_incidents_images.py \
-    --annotations-dir incidents-dataset \
-    --output-dir data/incidents_images \
-    --max-images 10000
-
-# Check download status without downloading
-python download-scripts/download_incidents_images.py \
-    --annotations-dir incidents-dataset \
-    --check-only
-```
-
-**Expected Output:**
-```
-2024-12-18 11:00:00 [INFO] Starting Incidents image download...
-2024-12-18 11:00:01 [INFO] Found 4 annotation files:
-  - eccv_train.json: 450,000 annotations
-  - eccv_val.json: 50,000 annotations
-  - multi_label_train.json: 300,000 annotations
-  - multi_label_val.json: 50,000 annotations
-2024-12-18 11:00:02 [INFO] Downloading images with 8 workers...
-  [====================================] 100% | 523,456/523,456 images
-2024-12-18 15:30:00 [INFO] Download complete!
-  - Successfully downloaded: 498,234 images
-  - Already existed: 12,000 images
-  - Failed: 13,222 images (URLs unavailable)
-```
-
-### Step 3: Set Up Robot Selection Dataset
+### Step 2: Set Up Robot Selection Dataset
 
 The robot selection dataset is included in the repository:
 
@@ -276,10 +233,6 @@ The robot selection dataset is included in the repository:
 # Verify robot selection dataset exists
 ls -la robot-selection-dataset/
 # Expected: multi-robot-selection.json
-
-# Copy to data directory
-mkdir -p data/robot_fleet
-cp robot-selection-dataset/multi-robot-selection.json data/robot_fleet/
 ```
 
 ### Expected Directory Structure After Setup
@@ -300,22 +253,8 @@ embervlm/
 │   │   └── flickr30k/
 │   │       ├── images/
 │   │       └── results.json
-│   ├── incidents_images/
-│   │   ├── images/
-│   │   │   ├── 00001.jpg
-│   │   │   ├── 00002.jpg
-│   │   │   └── ...
-│   │   └── filtered_annotations/
-│   │       ├── eccv_train_filtered.json
-│   │       └── eccv_val_filtered.json
-│   └── robot_fleet/
-│       └── multi-robot-selection.json
-├── incidents-dataset/
-│   ├── eccv_train.json
-│   ├── eccv_val.json
-│   ├── multi_label_train.json
-│   └── multi_label_val.json
-└── ...
+└── robot-selection-dataset/
+    └── multi-robot-selection.json
 ```
 
 ### Fallback: Manual Dataset Setup
@@ -325,7 +264,6 @@ If automated downloads fail, you can manually download datasets:
 1. **COCO**: Download from [cocodataset.org](https://cocodataset.org/#download)
 2. **VQA**: Download from [visualqa.org](https://visualqa.org/download.html)
 3. **LLaVA**: Download from [HuggingFace](https://huggingface.co/datasets/liuhaotian/LLaVA-Instruct-150K)
-4. **Incidents1M**: See [original repository](https://github.com/ethanweber/IncidentsDataset)
 
 ---
 
@@ -398,15 +336,13 @@ python scripts/train_all.py \
     --batch_size 64
 ```
 
-**Stage 3: Incident Specialization and Robot Selection**
+**Stage 3: Robot Fleet Selection**
 ```bash
 python scripts/train_all.py \
     --stage 3 \
     --output_dir ./outputs/stage3 \
     --checkpoint ./outputs/stage2/checkpoint-final \
-    --incident_data ./data/incidents_images \
-    --robot_data ./data/robot_fleet \
-    --stage3_incident_epochs 10 \
+    --robot_data ./robot-selection-dataset \
     --stage3_robot_epochs 20 \
     --batch_size 32
 ```
