@@ -39,6 +39,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# Default pretrained language model
+PRETRAINED_LANGUAGE_MODEL = "tinyllm/30M-0.4"
+
+
 def create_model(config: Optional[EmberVLMConfig] = None) -> EmberVLM:
     """Create and initialize EmberVLM model."""
     if config is None:
@@ -54,12 +58,28 @@ def create_model(config: Optional[EmberVLMConfig] = None) -> EmberVLM:
     return model
 
 
-def create_tokenizer() -> AutoTokenizer:
-    """Create and configure tokenizer."""
-    tokenizer = AutoTokenizer.from_pretrained('gpt2')
-    tokenizer.pad_token = tokenizer.eos_token
+def create_tokenizer(model_name: str = PRETRAINED_LANGUAGE_MODEL) -> AutoTokenizer:
+    """
+    Create and configure tokenizer.
 
-    # Add special tokens
+    Uses the tokenizer from the pretrained language model (tinyllm/30M-0.4)
+    which is GPT-2 based with vocab_size=50257.
+    """
+    try:
+        # Try to load tokenizer from pretrained model
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        logger.info(f"Loaded tokenizer from {model_name}")
+    except Exception as e:
+        # Fallback to GPT-2 tokenizer (compatible with tinyllm/30M-0.4)
+        logger.warning(f"Could not load tokenizer from {model_name}: {e}")
+        logger.info("Falling back to GPT-2 tokenizer")
+        tokenizer = AutoTokenizer.from_pretrained('gpt2')
+
+    # Set pad token if not set
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    # Add special tokens for EmberVLM
     special_tokens = {
         'additional_special_tokens': [
             '<|reasoning_start|>',
@@ -69,7 +89,8 @@ def create_tokenizer() -> AutoTokenizer:
             '<|image|>',
         ]
     }
-    tokenizer.add_special_tokens(special_tokens)
+    num_added = tokenizer.add_special_tokens(special_tokens)
+    logger.info(f"Added {num_added} special tokens to tokenizer")
 
     return tokenizer
 
@@ -91,10 +112,20 @@ def run_all_stages(args: argparse.Namespace):
 
     # Create model
     logger.info("Creating model...")
+    logger.info("Loading pretrained language model from tinyllm/30M-0.4...")
     model = create_model()
 
     # Resize embeddings for special tokens
-    model.language_model.model.resize_token_embeddings(len(tokenizer))
+    # Handle both PretrainedTinyLLMBackbone and TinyLLMBackbone
+    if hasattr(model.language_model, 'resize_token_embeddings'):
+        # PretrainedTinyLLMBackbone has this method
+        model.language_model.resize_token_embeddings(len(tokenizer))
+        logger.info(f"Resized token embeddings to {len(tokenizer)}")
+    elif hasattr(model.language_model, 'model'):
+        # TinyLLMBackbone wraps model
+        if hasattr(model.language_model.model, 'resize_token_embeddings'):
+            model.language_model.model.resize_token_embeddings(len(tokenizer))
+            logger.info(f"Resized token embeddings to {len(tokenizer)}")
 
     # Training configuration
     training_config = TrainingConfig(

@@ -182,25 +182,28 @@ class FusionModule(nn.Module):
     """
     Fusion Module for EmberVLM.
 
-    Maps vision encoder features (384-dim) to language model space (768-dim)
-    using adapter blocks with QK-normalization for training stability.
+    Maps vision encoder features to language model space using adapter blocks
+    with QK-normalization for training stability.
+
+    With tinyllm/30M-0.4 (hidden_size=384), vision and language dimensions match,
+    simplifying the fusion architecture.
 
     Architecture:
-        RepViT_Features(8×384) → Linear(384→768) → LayerNorm →
-        AdapterBlock(bottleneck=48) → TinyLLM_Input(8×768)
+        RepViT_Features(8×384) → Linear(384→384) → LayerNorm →
+        AdapterBlock(bottleneck=48) → TinyLLM_Input(8×384)
     """
 
     def __init__(
         self,
         vision_dim: int = 384,
-        language_dim: int = 768,
+        language_dim: int = 384,  # Match tinyllm/30M-0.4 hidden size
         bottleneck_dim: int = 48,
         num_visual_tokens: int = 8,
         dropout: float = 0.1,
         use_layer_norm: bool = True,
         use_qk_norm: bool = True,
         use_cross_attention: bool = False,
-        num_cross_attention_heads: int = 8,
+        num_cross_attention_heads: int = 6,  # Match tinyllm/30M-0.4 heads
     ):
         super().__init__()
 

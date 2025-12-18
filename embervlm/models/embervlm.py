@@ -3,6 +3,10 @@ EmberVLM - Complete Model Implementation
 
 A lightweight multimodal Vision-Language Model combining RepViT vision encoder
 and TinyLLM language backbone for robot fleet selection with incident reasoning.
+
+Uses pretrained models:
+- Vision: RepViT-XXS from THU-MIG/RepViT (HuggingFace)
+- Language: tinyllm/30M-0.4 from HuggingFace (GPT-2 style, trained on FineWeb + SHL)
 """
 
 import torch
@@ -12,7 +16,13 @@ from typing import Optional, Dict, Any, List, Tuple, Union
 from dataclasses import dataclass, field
 
 from embervlm.models.vision_encoder import RepViTEncoder, ImagePreprocessor
-from embervlm.models.language_model import TinyLLMBackbone, TinyLLMConfig
+from embervlm.models.language_model import (
+    TinyLLMBackbone,
+    TinyLLMConfig,
+    PretrainedTinyLLMBackbone,
+    create_language_backbone,
+    PRETRAINED_TINYLLM_MODEL,
+)
 from embervlm.models.fusion_module import FusionModule
 from embervlm.models.reasoning_heads import ReasoningModule, ReasoningLoss
 
@@ -29,14 +39,18 @@ class EmberVLMConfig:
     vision_output_dim: int = 384
     image_size: int = 224
 
-    # Language model
-    language_hidden_size: int = 768
+    # Language model (tinyllm/30M-0.4 defaults)
+    language_hidden_size: int = 384  # tinyllm/30M-0.4 uses 384
     language_num_layers: int = 6
-    language_num_heads: int = 12
+    language_num_heads: int = 6  # tinyllm/30M-0.4 uses 6 heads
     language_vocab_size: int = 50257
     language_max_length: int = 1024
     freeze_language_base: bool = True
     unfreeze_last_layer: bool = True
+
+    # Pretrained model settings
+    use_pretrained_language: bool = True
+    pretrained_language_model: str = "tinyllm/30M-0.4"
 
     # Fusion module
     fusion_bottleneck_dim: int = 48
@@ -45,7 +59,7 @@ class EmberVLMConfig:
 
     # Reasoning module
     reasoning_enabled: bool = True
-    reasoning_hidden_dim: int = 256
+    reasoning_hidden_dim: int = 192  # Reduced to match smaller language model
     reasoning_num_layers: int = 2
     reasoning_num_heads: int = 4
     num_reasoning_steps: int = 4
@@ -83,6 +97,8 @@ class EmberVLMConfig:
             'language_max_length': self.language_max_length,
             'freeze_language_base': self.freeze_language_base,
             'unfreeze_last_layer': self.unfreeze_last_layer,
+            'use_pretrained_language': self.use_pretrained_language,
+            'pretrained_language_model': self.pretrained_language_model,
             'fusion_bottleneck_dim': self.fusion_bottleneck_dim,
             'fusion_dropout': self.fusion_dropout,
             'use_qk_norm': self.use_qk_norm,
@@ -156,23 +172,38 @@ class EmberVLM(nn.Module):
         )
 
     def _build_language_model(self):
-        """Initialize language model."""
-        llm_config = TinyLLMConfig(
-            vocab_size=self.config.language_vocab_size,
-            hidden_size=self.config.language_hidden_size,
-            num_hidden_layers=self.config.language_num_layers,
-            num_attention_heads=self.config.language_num_heads,
-            max_position_embeddings=self.config.language_max_length,
-            hidden_dropout_prob=self.config.dropout,
-            attention_probs_dropout_prob=self.config.dropout,
-            use_qk_norm=self.config.use_qk_norm,
-        )
+        """Initialize language model (pretrained or from scratch)."""
+        if self.config.use_pretrained_language:
+            # Use pretrained TinyLLM from HuggingFace
+            self.language_model = create_language_backbone(
+                use_pretrained=True,
+                model_name=self.config.pretrained_language_model,
+                freeze_base=self.config.freeze_language_base,
+                unfreeze_last_layer=self.config.unfreeze_last_layer,
+            )
+            # Update config with actual model dimensions
+            self.config.language_hidden_size = self.language_model.config.hidden_size
+            self.config.language_num_layers = self.language_model.config.num_hidden_layers
+            self.config.language_num_heads = self.language_model.config.num_attention_heads
+            self.config.language_vocab_size = self.language_model.config.vocab_size
+        else:
+            # Create from scratch with custom config
+            llm_config = TinyLLMConfig(
+                vocab_size=self.config.language_vocab_size,
+                hidden_size=self.config.language_hidden_size,
+                num_hidden_layers=self.config.language_num_layers,
+                num_attention_heads=self.config.language_num_heads,
+                max_position_embeddings=self.config.language_max_length,
+                hidden_dropout_prob=self.config.dropout,
+                attention_probs_dropout_prob=self.config.dropout,
+                use_qk_norm=self.config.use_qk_norm,
+            )
 
-        self.language_model = TinyLLMBackbone(
-            config=llm_config,
-            freeze_base=self.config.freeze_language_base,
-            unfreeze_last_layer=self.config.unfreeze_last_layer,
-        )
+            self.language_model = TinyLLMBackbone(
+                config=llm_config,
+                freeze_base=self.config.freeze_language_base,
+                unfreeze_last_layer=self.config.unfreeze_last_layer,
+            )
 
     def _build_fusion_module(self):
         """Initialize fusion module."""

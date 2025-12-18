@@ -107,8 +107,8 @@ class ReasoningHead(nn.Module):
 
     def __init__(
         self,
-        input_dim: int = 768,
-        hidden_dim: int = 256,
+        input_dim: int = 384,  # Match tinyllm/30M-0.4 hidden size
+        hidden_dim: int = 192,  # Reduced to match smaller model
         num_layers: int = 2,
         num_heads: int = 4,
         num_reasoning_steps: int = 4,
@@ -182,8 +182,8 @@ class RobotSelectionHead(nn.Module):
 
     def __init__(
         self,
-        input_dim: int = 768,
-        hidden_dim: int = 256,
+        input_dim: int = 384,  # Match tinyllm/30M-0.4 hidden size
+        hidden_dim: int = 192,  # Reduced to match smaller model
         num_robots: int = 5,
         dropout: float = 0.1,
     ):
@@ -259,8 +259,8 @@ class ActionPlanningHead(nn.Module):
 
     def __init__(
         self,
-        input_dim: int = 768,
-        hidden_dim: int = 256,
+        input_dim: int = 384,  # Match tinyllm/30M-0.4 hidden size
+        hidden_dim: int = 192,  # Reduced to match smaller model
         max_plan_steps: int = 5,
         dropout: float = 0.1,
     ):
@@ -362,8 +362,8 @@ class ReasoningModule(nn.Module):
 
     def __init__(
         self,
-        input_dim: int = 768,
-        hidden_dim: int = 256,
+        input_dim: int = 384,  # Match tinyllm/30M-0.4 hidden size
+        hidden_dim: int = 192,  # Reduced to match smaller model
         num_reasoning_layers: int = 2,
         num_reasoning_heads: int = 4,
         num_reasoning_steps: int = 4,

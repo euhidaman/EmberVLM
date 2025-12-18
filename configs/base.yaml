@@ -2,7 +2,7 @@
 # Default settings for model architecture and training
 
 model:
-  # Vision encoder
+  # Vision encoder (RepViT-XXS from HuggingFace)
   vision_model: "repvit_xxs"
   vision_pretrained: true
   freeze_vision: true
@@ -10,14 +10,19 @@ model:
   vision_output_dim: 384
   image_size: 224
 
-  # Language model
-  language_hidden_size: 768
+  # Language model (tinyllm/30M-0.4 from HuggingFace)
+  # Pretrained on FineWeb + SHL sensor data
+  language_hidden_size: 384  # tinyllm/30M-0.4 uses 384
   language_num_layers: 6
-  language_num_heads: 12
+  language_num_heads: 6  # tinyllm/30M-0.4 uses 6 heads
   language_vocab_size: 50257
   language_max_length: 1024
   freeze_language_base: true
   unfreeze_last_layer: true
+
+  # Pretrained model settings
+  use_pretrained_language: true
+  pretrained_language_model: "tinyllm/30M-0.4"
 
   # Fusion module
   fusion_bottleneck_dim: 48
@@ -26,7 +31,7 @@ model:
 
   # Reasoning module
   reasoning_enabled: true
-  reasoning_hidden_dim: 256
+  reasoning_hidden_dim: 192  # Reduced to match smaller language model
   reasoning_num_layers: 2
   reasoning_num_heads: 4
   num_reasoning_steps: 4

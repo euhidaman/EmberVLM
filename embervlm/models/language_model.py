@@ -3,6 +3,9 @@ TinyLLM Language Model Backbone for EmberVLM
 
 A lightweight GPT-2 style language model with ~30M parameters,
 optimized for multimodal fusion and edge deployment.
+
+Supports loading pretrained weights from HuggingFace:
+- tinyllm/30M-0.4: 30M parameter GPT-2 model trained on FineWeb + SHL sensor data
 """
 
 import math
@@ -12,17 +15,30 @@ import torch.nn.functional as F
 from typing import Optional, Tuple, Dict, Any, List, Union
 from dataclasses import dataclass
 
+# HuggingFace imports for pretrained model loading
+try:
+    from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
+    HF_AVAILABLE = True
+except ImportError:
+    HF_AVAILABLE = False
+    AutoModelForCausalLM = None
+    AutoTokenizer = None
+    AutoConfig = None
+
+# Default pretrained model
+PRETRAINED_TINYLLM_MODEL = "tinyllm/30M-0.4"
+
 
 @dataclass
 class TinyLLMConfig:
     """Configuration for TinyLLM model."""
 
     vocab_size: int = 50257  # GPT-2 vocabulary
-    hidden_size: int = 768
+    hidden_size: int = 384  # tinyllm/30M-0.4 uses 384
     num_hidden_layers: int = 6
-    num_attention_heads: int = 12
-    intermediate_size: int = 3072
-    hidden_act: str = "gelu"
+    num_attention_heads: int = 6  # tinyllm/30M-0.4 uses 6 heads
+    intermediate_size: int = 1536  # 4 * hidden_size
+    hidden_act: str = "gelu_new"  # GPT-2 style
     hidden_dropout_prob: float = 0.1
     attention_probs_dropout_prob: float = 0.1
     max_position_embeddings: int = 1024
@@ -38,6 +54,10 @@ class TinyLLMConfig:
     # Additional config
     use_qk_norm: bool = True
     tie_word_embeddings: bool = True
+
+    # Pretrained model settings
+    use_pretrained: bool = True
+    pretrained_model_name: str = "tinyllm/30M-0.4"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -58,6 +78,8 @@ class TinyLLMConfig:
             'pad_token_id': self.pad_token_id,
             'use_qk_norm': self.use_qk_norm,
             'tie_word_embeddings': self.tie_word_embeddings,
+            'use_pretrained': self.use_pretrained,
+            'pretrained_model_name': self.pretrained_model_name,
         }
 
     @classmethod
@@ -695,4 +717,221 @@ class TinyLLMBackbone(nn.Module):
     @property
     def dtype(self) -> torch.dtype:
         return next(self.parameters()).dtype
+
+
+class PretrainedTinyLLMBackbone(nn.Module):
+    """
+    Pretrained TinyLLM Backbone wrapper for EmberVLM.
+
+    Loads pretrained weights from HuggingFace Hub (tinyllm/30M-0.4).
+    This model is a 30M parameter GPT-2 style model trained on:
+    - FineWeb dataset (web text)
+    - SHL sensor dataset (human activity data)
+
+    Model specs:
+    - Hidden size: 384
+    - Layers: 6
+    - Attention heads: 6
+    - Vocab size: 50257 (GPT-2)
+    - Context length: 1024
+    """
+
+    def __init__(
+        self,
+        model_name: str = PRETRAINED_TINYLLM_MODEL,
+        freeze_base: bool = True,
+        unfreeze_last_layer: bool = True,
+        torch_dtype: torch.dtype = torch.bfloat16,
+    ):
+        super().__init__()
+
+        if not HF_AVAILABLE:
+            raise ImportError(
+                "transformers library is required for PretrainedTinyLLMBackbone. "
+                "Install with: pip install transformers"
+            )
+
+        self.model_name = model_name
+        self.torch_dtype = torch_dtype
+
+        # Load pretrained model from HuggingFace
+        print(f"Loading pretrained TinyLLM from {model_name}...")
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=torch_dtype,
+            trust_remote_code=True,
+        )
+
+        # Get config from loaded model
+        self.hf_config = self.model.config
+
+        # Create compatible TinyLLMConfig
+        self.config = TinyLLMConfig(
+            vocab_size=self.hf_config.vocab_size,
+            hidden_size=self.hf_config.n_embd,
+            num_hidden_layers=self.hf_config.n_layer,
+            num_attention_heads=self.hf_config.n_head,
+            intermediate_size=self.hf_config.n_inner if self.hf_config.n_inner else 4 * self.hf_config.n_embd,
+            hidden_act="gelu_new",
+            max_position_embeddings=self.hf_config.n_positions,
+            use_pretrained=True,
+            pretrained_model_name=model_name,
+        )
+
+        print(f"Loaded model with hidden_size={self.config.hidden_size}, "
+              f"layers={self.config.num_hidden_layers}, "
+              f"heads={self.config.num_attention_heads}")
+
+        # Freeze/unfreeze parameters
+        if freeze_base:
+            self._freeze_base()
+
+        if unfreeze_last_layer:
+            self._unfreeze_last_layer()
+
+        # Count parameters
+        total_params = sum(p.numel() for p in self.model.parameters())
+        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        print(f"Total parameters: {total_params:,}")
+        print(f"Trainable parameters: {trainable_params:,}")
+
+    def _freeze_base(self):
+        """Freeze all parameters."""
+        for param in self.model.parameters():
+            param.requires_grad = False
+
+    def _unfreeze_last_layer(self):
+        """Unfreeze the last transformer layer and output head."""
+        # GPT-2 style model structure
+        if hasattr(self.model, 'transformer'):
+            # Standard GPT-2 structure
+            for param in self.model.transformer.h[-1].parameters():
+                param.requires_grad = True
+            for param in self.model.transformer.ln_f.parameters():
+                param.requires_grad = True
+        elif hasattr(self.model, 'model'):
+            # Some models wrap in .model
+            if hasattr(self.model.model, 'layers'):
+                for param in self.model.model.layers[-1].parameters():
+                    param.requires_grad = True
+            if hasattr(self.model.model, 'norm'):
+                for param in self.model.model.norm.parameters():
+                    param.requires_grad = True
+
+        # Unfreeze LM head
+        if hasattr(self.model, 'lm_head'):
+            for param in self.model.lm_head.parameters():
+                param.requires_grad = True
+
+    def get_input_embeddings(self) -> nn.Embedding:
+        """Get input embedding layer."""
+        return self.model.get_input_embeddings()
+
+    def set_input_embeddings(self, new_embeddings: nn.Embedding):
+        """Set input embedding layer."""
+        self.model.set_input_embeddings(new_embeddings)
+
+    def embed_tokens(self, input_ids: torch.LongTensor) -> torch.FloatTensor:
+        """Get token embeddings."""
+        return self.model.get_input_embeddings()(input_ids)
+
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        attention_mask: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[List[Tuple[torch.Tensor]]] = None,
+        use_cache: bool = False,
+        output_attentions: bool = False,
+        output_hidden_states: bool = False,
+    ) -> Dict[str, torch.Tensor]:
+        """Forward pass through the language model."""
+        outputs = self.model(
+            input_ids=input_ids,
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            labels=labels,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=True,
+        )
+
+        # Convert to dict format compatible with rest of EmberVLM
+        return {
+            'loss': outputs.loss,
+            'logits': outputs.logits,
+            'past_key_values': outputs.past_key_values,
+            'hidden_states': outputs.hidden_states,
+            'attentions': outputs.attentions,
+            'last_hidden_state': outputs.hidden_states[-1] if outputs.hidden_states else None,
+        }
+
+    @torch.no_grad()
+    def generate(self, **kwargs) -> torch.LongTensor:
+        """Generate text."""
+        return self.model.generate(**kwargs)
+
+    def get_hidden_size(self) -> int:
+        """Return hidden size."""
+        return self.config.hidden_size
+
+    def get_vocab_size(self) -> int:
+        """Return vocabulary size."""
+        return self.config.vocab_size
+
+    def resize_token_embeddings(self, new_num_tokens: int):
+        """Resize token embeddings for special tokens."""
+        self.model.resize_token_embeddings(new_num_tokens)
+        self.config.vocab_size = new_num_tokens
+
+    @property
+    def device(self) -> torch.device:
+        return next(self.parameters()).device
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return next(self.parameters()).dtype
+
+
+def create_language_backbone(
+    use_pretrained: bool = True,
+    model_name: str = PRETRAINED_TINYLLM_MODEL,
+    config: Optional[TinyLLMConfig] = None,
+    freeze_base: bool = True,
+    unfreeze_last_layer: bool = True,
+    torch_dtype: torch.dtype = torch.bfloat16,
+) -> Union[PretrainedTinyLLMBackbone, TinyLLMBackbone]:
+    """
+    Factory function to create language backbone.
+
+    Args:
+        use_pretrained: If True, load pretrained weights from HuggingFace
+        model_name: HuggingFace model name (default: tinyllm/30M-0.4)
+        config: Custom TinyLLMConfig (only used if use_pretrained=False)
+        freeze_base: Whether to freeze base model parameters
+        unfreeze_last_layer: Whether to unfreeze last layer for fine-tuning
+        torch_dtype: Data type for model weights
+
+    Returns:
+        Language model backbone (pretrained or from scratch)
+    """
+    if use_pretrained and HF_AVAILABLE:
+        return PretrainedTinyLLMBackbone(
+            model_name=model_name,
+            freeze_base=freeze_base,
+            unfreeze_last_layer=unfreeze_last_layer,
+            torch_dtype=torch_dtype,
+        )
+    else:
+        if not HF_AVAILABLE and use_pretrained:
+            print("Warning: transformers not available, falling back to random initialization")
+        return TinyLLMBackbone(
+            config=config,
+            freeze_base=freeze_base,
+            unfreeze_last_layer=unfreeze_last_layer,
+        )
+
 
