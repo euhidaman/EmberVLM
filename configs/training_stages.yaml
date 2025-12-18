@@ -67,38 +67,26 @@ stage2:
     - "vqa_accuracy"
     - "instruction_following_score"
 
-# Stage 3: Incident Understanding & Robot Reasoning
+# Stage 3: Robot Fleet Selection Training
 stage3:
-  name: "incident_robot_training"
-  description: "Specialize for incident analysis and robot selection"
+  name: "robot_selection_training"
+  description: "Train model for robot fleet selection based on task requirements"
 
-  # Two phases
-  incident_phase:
-    epochs: 10
-    batch_size: 32
-    learning_rate: 2.0e-4
+  # Training configuration
+  epochs: 20
+  batch_size: 32
+  learning_rate: 1.0e-4
 
-    datasets:
-      - name: "incidents1m_eccv"
-        samples: 500000
-      - name: "incidents1m_vl"
-        samples: 200000
-      - name: "multi_label_train"
-        samples: 300000
+  # Datasets
+  datasets:
+    - name: "robot_selection"
+      samples: 1000  # 100 base + 10x augmentation
 
-  robot_phase:
-    epochs: 20
-    batch_size: 32
-    learning_rate: 1.0e-4
-
-    datasets:
-      - name: "robot_selection"
-        samples: 1000  # 100 base + 10x augmentation
-
-    augmentation:
-      synonym_replacement: true
-      task_variation: true
-      augmentation_factor: 10
+  # Data augmentation
+  augmentation:
+    synonym_replacement: true
+    task_variation: true
+    augmentation_factor: 10
 
   # Special tokens
   special_tokens:

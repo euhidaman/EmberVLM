@@ -1,8 +1,8 @@
 """
-Stage 3: Incident Understanding & Robot Reasoning
+Stage 3: Robot Fleet Selection Training
 
-Specializes the model for incident analysis using the Incidents1M dataset
-and trains robot selection capabilities.
+Trains the model for robot fleet selection based on task requirements.
+Uses the robot-selection-dataset with augmentation.
 """
 
 import os
@@ -35,7 +35,6 @@ from embervlm.training.train_utils import (
     MetricTracker,
     print_trainable_parameters,
 )
-from embervlm.data.incident_loader import get_incident_dataloader
 from embervlm.data.robot_loader import get_robot_selection_dataloader
 from embervlm.monitoring.wandb_logger import WandbLogger
 from embervlm.monitoring.carbon_tracker import CarbonTracker
@@ -44,13 +43,12 @@ logger = logging.getLogger(__name__)
 
 
 class Stage3Trainer:
-    """Trainer for Stage 3: Incident Understanding & Robot Reasoning."""
+    """Trainer for Stage 3: Robot Fleet Selection."""
 
     def __init__(
         self,
         model: EmberVLM,
         config: TrainingConfig,
-        incident_dataloader: DataLoader,
         robot_dataloader: DataLoader,
         val_dataloader: Optional[DataLoader] = None,
         tokenizer: Any = None,
@@ -68,7 +66,6 @@ class Stage3Trainer:
         self.model = wrap_model_ddp(model, config, self.device)
 
         # Data loaders
-        self.incident_dataloader = incident_dataloader
         self.robot_dataloader = robot_dataloader
         self.val_dataloader = val_dataloader
 
@@ -98,7 +95,7 @@ class Stage3Trainer:
         if is_main_process():
             self.wandb_logger = WandbLogger(
                 project="embervlm",
-                name="stage3_incidents",
+                name="stage3_robot_selection",
                 config=config.to_dict(),
             )
             self.carbon_tracker = CarbonTracker(output_dir=config.output_dir)
@@ -108,33 +105,6 @@ class Stage3Trainer:
 
         if is_main_process():
             print_trainable_parameters(self.model)
-
-    def train_incident_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
-        """Training step for incident understanding."""
-        pixel_values = batch['pixel_values'].to(self.device)
-        input_ids = batch['input_ids'].to(self.device)
-        attention_mask = batch['attention_mask'].to(self.device)
-        labels = batch['labels'].to(self.device)
-        incident_labels = batch.get('incident_labels')
-
-        with get_autocast_context(self.config):
-            outputs = self.model(
-                input_ids=input_ids,
-                pixel_values=pixel_values,
-                attention_mask=attention_mask,
-                labels=labels,
-            )
-
-            loss = outputs['loss']
-
-            # Multi-label classification for incidents
-            if incident_labels is not None:
-                incident_labels = incident_labels.to(self.device)
-                # Additional classification loss would go here
-
-        return loss, {
-            'incident_loss': loss.item(),
-        }
 
     def train_robot_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
         """Training step for robot selection."""
@@ -168,19 +138,13 @@ class Stage3Trainer:
             'robot_accuracy': robot_acc.item(),
         }
 
-    def train_epoch(self, epoch: int, phase: str = 'incident'):
+    def train_epoch(self, epoch: int):
         """Train for one epoch."""
         self.model.train()
         self.metric_tracker.reset()
 
-        if phase == 'incident':
-            dataloader = self.incident_dataloader
-            train_fn = self.train_incident_step
-            desc = f"Incident Epoch {epoch}"
-        else:
-            dataloader = self.robot_dataloader
-            train_fn = self.train_robot_step
-            desc = f"Robot Epoch {epoch}"
+        dataloader = self.robot_dataloader
+        desc = f"Robot Selection Epoch {epoch}"
 
         progress_bar = tqdm(
             dataloader,
@@ -189,7 +153,7 @@ class Stage3Trainer:
         )
 
         for batch_idx, batch in enumerate(progress_bar):
-            loss, metrics = train_fn(batch)
+            loss, metrics = self.train_robot_step(batch)
 
             # Backward
             if self.config.gradient_accumulation_steps > 1:
@@ -250,7 +214,6 @@ class Stage3Trainer:
         self.model.eval()
         eval_metrics = MetricTracker()
 
-        # Create combined evaluation data
         val_data = self.val_dataloader if self.val_dataloader else self.robot_dataloader
 
         correct = 0
@@ -331,30 +294,20 @@ class Stage3Trainer:
                 import shutil
                 shutil.rmtree(oldest)
 
-    def train(self, incident_epochs: int = 10, robot_epochs: int = 20):
-        """Run full Stage 3 training."""
+    def train(self, robot_epochs: int = 20):
+        """Run Stage 3 robot selection training."""
         if is_main_process() and self.carbon_tracker is not None:
             self.carbon_tracker.start()
 
         try:
-            # Phase 1: Incident understanding
-            logger.info("Phase 1: Incident Understanding")
-            for epoch in range(incident_epochs):
-                if hasattr(self.incident_dataloader.sampler, 'set_epoch'):
-                    self.incident_dataloader.sampler.set_epoch(epoch)
-
-                self.train_epoch(epoch, phase='incident')
-                barrier()
-
-            # Phase 2: Robot selection
-            logger.info("Phase 2: Robot Selection")
+            logger.info("Stage 3: Robot Fleet Selection Training")
             for epoch in range(robot_epochs):
                 if hasattr(self.robot_dataloader.sampler, 'set_epoch'):
                     self.robot_dataloader.sampler.set_epoch(epoch)
 
-                self.train_epoch(epoch, phase='robot')
+                self.train_epoch(epoch)
 
-                # Evaluate after each robot epoch
+                # Evaluate after each epoch
                 if self.val_dataloader is not None:
                     self.evaluate()
 
@@ -378,21 +331,11 @@ class Stage3Trainer:
 def run_stage3_training(
     model: EmberVLM,
     config: TrainingConfig,
-    incident_data_dir: str,
     robot_data_dir: str,
     tokenizer: Any,
-    incident_epochs: int = 10,
     robot_epochs: int = 20,
 ):
-    """Run Stage 3 training."""
-    incident_dataloader = get_incident_dataloader(
-        data_dir=incident_data_dir,
-        tokenizer=tokenizer,
-        batch_size=config.batch_size,
-        split='train',
-        distributed=config.distributed,
-    )
-
+    """Run Stage 3 robot selection training."""
     robot_dataloader = get_robot_selection_dataloader(
         data_dir=robot_data_dir,
         tokenizer=tokenizer,
@@ -412,13 +355,12 @@ def run_stage3_training(
     trainer = Stage3Trainer(
         model=model,
         config=config,
-        incident_dataloader=incident_dataloader,
         robot_dataloader=robot_dataloader,
         val_dataloader=val_dataloader,
         tokenizer=tokenizer,
     )
 
-    trainer.train(incident_epochs, robot_epochs)
+    trainer.train(robot_epochs)
 
 
 if __name__ == "__main__":
@@ -426,14 +368,12 @@ if __name__ == "__main__":
     from transformers import AutoTokenizer
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--incident_dir', type=str, required=True)
     parser.add_argument('--robot_dir', type=str, required=True)
     parser.add_argument('--output_dir', type=str, default='./outputs/stage3')
     parser.add_argument('--checkpoint', type=str, default=None)
     parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--incident_epochs', type=int, default=10)
     parser.add_argument('--robot_epochs', type=int, default=20)
-    parser.add_argument('--lr', type=float, default=2e-4)
+    parser.add_argument('--lr', type=float, default=1e-4)
     args = parser.parse_args()
 
     config = TrainingConfig(
@@ -453,10 +393,7 @@ if __name__ == "__main__":
     run_stage3_training(
         model=model,
         config=config,
-        incident_data_dir=args.incident_dir,
         robot_data_dir=args.robot_dir,
         tokenizer=tokenizer,
-        incident_epochs=args.incident_epochs,
         robot_epochs=args.robot_epochs,
     )
-

@@ -198,10 +198,10 @@ def run_all_stages(args: argparse.Namespace):
             else:
                 logger.warning("Stage 2 data not provided, skipping...")
 
-        # Stage 3: Incident & Robot Training
+        # Stage 3: Robot Selection Training
         if args.stage in ['all', '3']:
             logger.info("="*60)
-            logger.info("Stage 3: Incident Understanding & Robot Reasoning")
+            logger.info("Stage 3: Robot Fleet Selection Training")
             logger.info("="*60)
 
             stage3_config = TrainingConfig(
@@ -211,23 +211,23 @@ def run_all_stages(args: argparse.Namespace):
                 num_training_steps=args.stage3_steps,
             )
 
-            incident_dir = args.incident_data or str(Path(__file__).parent.parent / 'incidents-dataset')
-            robot_dir = args.robot_data or str(output_dir / 'robot-selection-data')
+            robot_dir = args.robot_data or str(Path(__file__).parent.parent / 'robot-selection-dataset')
 
             # Create robot selection data if needed
             if not Path(robot_dir).exists():
                 from embervlm.data.robot_loader import create_robot_selection_dataset
                 create_robot_selection_dataset(robot_dir)
 
-            run_stage3_training(
-                model=model,
-                config=stage3_config,
-                incident_data_dir=incident_dir,
-                robot_data_dir=robot_dir,
-                tokenizer=tokenizer,
-                incident_epochs=args.stage3_incident_epochs,
-                robot_epochs=args.stage3_robot_epochs,
-            )
+            if Path(robot_dir).exists():
+                run_stage3_training(
+                    model=model,
+                    config=stage3_config,
+                    robot_data_dir=robot_dir,
+                    tokenizer=tokenizer,
+                    robot_epochs=args.stage3_robot_epochs,
+                )
+            else:
+                logger.warning("Stage 3 robot data not found, skipping...")
 
         # Stage 4: Reasoning Integration
         if args.stage in ['all', '4']:
@@ -311,8 +311,6 @@ def main():
                        help='Path to Stage 1 alignment data')
     parser.add_argument('--stage2_data', type=str, default=None,
                        help='Path to Stage 2 instruction data')
-    parser.add_argument('--incident_data', type=str, default=None,
-                       help='Path to incident dataset')
     parser.add_argument('--robot_data', type=str, default=None,
                        help='Path to robot selection data')
     parser.add_argument('--reasoning_data', type=str, default=None,
@@ -323,7 +321,6 @@ def main():
     parser.add_argument('--stage1_steps', type=int, default=10000)
     parser.add_argument('--stage2_epochs', type=int, default=5)
     parser.add_argument('--stage2_steps', type=int, default=15000)
-    parser.add_argument('--stage3_incident_epochs', type=int, default=10)
     parser.add_argument('--stage3_robot_epochs', type=int, default=20)
     parser.add_argument('--stage3_steps', type=int, default=20000)
     parser.add_argument('--stage4_phase1_epochs', type=int, default=5)
