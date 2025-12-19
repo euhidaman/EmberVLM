@@ -156,12 +156,13 @@ def run_all_stages(args: argparse.Namespace):
             logger.info("Stage 1: Visual-Language Alignment")
             logger.info("="*60)
 
-            stage1_config = TrainingConfig(
-                **training_config.to_dict(),
-                output_dir=str(output_dir / 'stage1'),
-                batch_size=128,
-                num_training_steps=args.stage1_steps,
-            )
+            stage1_dict = training_config.to_dict()
+            stage1_dict.update({
+                'output_dir': str(output_dir / 'stage1'),
+                'batch_size': 128,
+                'num_training_steps': args.stage1_steps,
+            })
+            stage1_config = TrainingConfig(**stage1_dict)
 
             if args.stage1_data:
                 run_stage1_training(
@@ -180,12 +181,13 @@ def run_all_stages(args: argparse.Namespace):
             logger.info("Stage 2: Multimodal Instruction Tuning")
             logger.info("="*60)
 
-            stage2_config = TrainingConfig(
-                **training_config.to_dict(),
-                output_dir=str(output_dir / 'stage2'),
-                batch_size=64,
-                num_training_steps=args.stage2_steps,
-            )
+            stage2_dict = training_config.to_dict()
+            stage2_dict.update({
+                'output_dir': str(output_dir / 'stage2'),
+                'batch_size': 64,
+                'num_training_steps': args.stage2_steps,
+            })
+            stage2_config = TrainingConfig(**stage2_dict)
 
             if args.stage2_data:
                 run_stage2_training(
@@ -204,12 +206,13 @@ def run_all_stages(args: argparse.Namespace):
             logger.info("Stage 3: Robot Fleet Selection Training")
             logger.info("="*60)
 
-            stage3_config = TrainingConfig(
-                **training_config.to_dict(),
-                output_dir=str(output_dir / 'stage3'),
-                batch_size=32,
-                num_training_steps=args.stage3_steps,
-            )
+            stage3_dict = training_config.to_dict()
+            stage3_dict.update({
+                'output_dir': str(output_dir / 'stage3'),
+                'batch_size': 32,
+                'num_training_steps': args.stage3_steps,
+            })
+            stage3_config = TrainingConfig(**stage3_dict)
 
             robot_dir = args.robot_data or str(Path(__file__).parent.parent / 'robot-selection-dataset')
 
