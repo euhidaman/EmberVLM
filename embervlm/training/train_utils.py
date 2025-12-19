@@ -99,7 +99,7 @@ def setup_distributed() -> Tuple[int, int, int]:
         local_rank = 0
         world_size = 1
 
-    if world_size > 1:
+    if world_size > 1 and not dist.is_initialized():
         dist.init_process_group(
             backend="nccl",
             rank=rank,
