@@ -259,15 +259,26 @@ def repvit_xxs(pretrained: bool = False) -> RepViT:
     model = RepViT(cfgs, num_classes=0, distillation=False)
 
     if pretrained:
-        # Load pretrained weights from HuggingFace
+        # Load pretrained weights from timm
         try:
-            from huggingface_hub import hf_hub_download
-            checkpoint_path = hf_hub_download(
-                repo_id="THU-MIG/RepViT",
-                filename="repvit_xxs.pth",
-            )
-            state_dict = torch.load(checkpoint_path, map_location='cpu')
-            model.load_state_dict(state_dict, strict=False)
+            import timm
+            # Use timm's repvit_m0_9 as a lightweight pretrained base
+            # This is the closest match to xxs size while being available
+            pretrained_model = timm.create_model('repvit_m0_9.dist_450e_in1k', pretrained=True)
+
+            # Extract compatible weights (feature extractor part)
+            pretrained_dict = pretrained_model.state_dict()
+            model_dict = model.state_dict()
+
+            # Filter out incompatible keys (classifier head, size mismatches)
+            compatible_dict = {}
+            for k, v in pretrained_dict.items():
+                if k in model_dict and v.shape == model_dict[k].shape:
+                    compatible_dict[k] = v
+
+            model_dict.update(compatible_dict)
+            model.load_state_dict(model_dict, strict=False)
+            print(f"Loaded {len(compatible_dict)}/{len(model_dict)} weights from timm/repvit_m0_9.dist_450e_in1k")
         except Exception as e:
             print(f"Warning: Could not load pretrained weights: {e}")
 
@@ -302,8 +313,25 @@ class RepViTEncoder(nn.Module):
         if model_name == "repvit_xxs":
             self.backbone = repvit_xxs(pretrained=pretrained)
             self.backbone_dim = 256  # XXS output dimension
+        elif model_name.startswith("repvit_m"):
+            # Use timm models directly
+            import timm
+            timm_model_name = f"{model_name}.dist_450e_in1k" if "dist" not in model_name else model_name
+            self.backbone = timm.create_model(timm_model_name, pretrained=pretrained, num_classes=0)
+
+            # Determine backbone output dimension based on model size
+            model_dims = {
+                'repvit_m0_9': 256,
+                'repvit_m1_0': 256,
+                'repvit_m1_1': 320,
+                'repvit_m1_5': 384,
+                'repvit_m2_3': 512,
+            }
+            base_name = model_name.split('.')[0]
+            self.backbone_dim = model_dims.get(base_name, 256)
+            print(f"Using timm model: {timm_model_name} with output_dim={self.backbone_dim}")
         else:
-            raise ValueError(f"Unknown model: {model_name}")
+            raise ValueError(f"Unknown model: {model_name}. Use 'repvit_xxs' or timm model like 'repvit_m0_9'")
 
         # Adaptive pooling to get fixed number of tokens
         pool_size = int(num_visual_tokens ** 0.5)

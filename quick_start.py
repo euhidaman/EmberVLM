@@ -19,8 +19,8 @@ def create_model():
     from embervlm.models import EmberVLM, EmberVLMConfig
 
     config = EmberVLMConfig(
-        vision_model="repvit_xxs",
-        vision_pretrained=False,  # Set True to download pretrained weights
+        vision_model="repvit_m0_9",  # Using timm model
+        vision_pretrained=True,  # Now works with timm models
         freeze_vision=True,
         num_visual_tokens=8,
         vision_output_dim=384,

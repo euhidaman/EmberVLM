@@ -32,7 +32,7 @@ class EmberVLMConfig:
     """Configuration for EmberVLM model."""
 
     # Vision encoder
-    vision_model: str = "repvit_xxs"
+    vision_model: str = "repvit_m0_9"  # Using timm model: repvit_m0_9.dist_450e_in1k
     vision_pretrained: bool = True
     freeze_vision: bool = True
     num_visual_tokens: int = 8

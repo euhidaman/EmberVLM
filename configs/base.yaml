@@ -2,8 +2,9 @@
 # Default settings for model architecture and training
 
 model:
-  # Vision encoder (RepViT-XXS from HuggingFace)
-  vision_model: "repvit_xxs"
+  # Vision encoder (RepViT from timm library)
+  # Using repvit_m0_9.dist_450e_in1k - lightweight model suitable for edge deployment
+  vision_model: "repvit_m0_9"
   vision_pretrained: true
   freeze_vision: true
   num_visual_tokens: 8
