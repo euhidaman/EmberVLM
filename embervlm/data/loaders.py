@@ -105,6 +105,9 @@ class AlignmentDataset(BaseVLMDataset):
 
     def _load_data(self) -> List[Dict[str, Any]]:
         """Load image-caption pairs."""
+        import logging
+        logger = logging.getLogger(__name__)
+
         samples = []
 
         # Check for different data formats
@@ -136,6 +139,7 @@ class AlignmentDataset(BaseVLMDataset):
         else:
             samples = samples[int(len(samples) * 0.9):]
 
+        logger.info(f"Loaded {len(samples)} samples for {self.split} split from {self.data_dir}")
         return samples
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
@@ -158,6 +162,9 @@ class InstructionDataset(BaseVLMDataset):
 
     def _load_data(self) -> List[Dict[str, Any]]:
         """Load instruction data."""
+        import logging
+        logger = logging.getLogger(__name__)
+
         samples = []
 
         json_files = list(self.data_dir.glob('*.json'))
@@ -169,11 +176,22 @@ class InstructionDataset(BaseVLMDataset):
             if isinstance(data, list):
                 for item in data:
                     if 'image' in item:
-                        samples.append({
-                            'image': item['image'],
-                            'instruction': item.get('instruction', item.get('question', '')),
-                            'response': item.get('response', item.get('answer', '')),
-                        })
+                        # Try to load instruction-format data
+                        if 'instruction' in item or 'question' in item:
+                            samples.append({
+                                'image': item['image'],
+                                'instruction': item.get('instruction', item.get('question', '')),
+                                'response': item.get('response', item.get('answer', '')),
+                            })
+                        # Fallback to caption data for instruction tuning
+                        elif 'caption' in item or 'text' in item:
+                            caption = item.get('caption', item.get('text', ''))
+                            # Convert caption to instruction format
+                            samples.append({
+                                'image': item['image'],
+                                'instruction': 'Describe this image.',
+                                'response': caption,
+                            })
 
         # Split
         if self.split == 'train':
@@ -181,6 +199,7 @@ class InstructionDataset(BaseVLMDataset):
         else:
             samples = samples[int(len(samples) * 0.9):]
 
+        logger.info(f"Loaded {len(samples)} samples for {self.split} split from {self.data_dir}")
         return samples
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
@@ -203,6 +222,9 @@ class ReasoningDataset(BaseVLMDataset):
 
     def _load_data(self) -> List[Dict[str, Any]]:
         """Load reasoning data with chains."""
+        import logging
+        logger = logging.getLogger(__name__)
+
         samples = []
 
         json_files = list(self.data_dir.glob('*.json'))
@@ -228,6 +250,7 @@ class ReasoningDataset(BaseVLMDataset):
         else:
             samples = samples[int(len(samples) * 0.9):]
 
+        logger.info(f"Loaded {len(samples)} samples for {self.split} split from {self.data_dir}")
         return samples
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
