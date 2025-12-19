@@ -98,6 +98,18 @@ def create_tokenizer(model_name: str = PRETRAINED_LANGUAGE_MODEL) -> AutoTokeniz
 def run_all_stages(args: argparse.Namespace):
     """Run all training stages."""
 
+    # Setup distributed training if enabled
+    if args.distributed:
+        rank, local_rank, world_size = setup_distributed()
+        logger.info(f"Distributed training initialized: rank={rank}, local_rank={local_rank}, world_size={world_size}")
+        device = torch.device(f'cuda:{local_rank}')
+    else:
+        rank = 0
+        local_rank = 0
+        world_size = 1
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        logger.info(f"Single process training on device: {device}")
+
     # Setup
     set_seed(args.seed)
 
@@ -274,6 +286,11 @@ def run_all_stages(args: argparse.Namespace):
         # Stop carbon tracking
         total_emissions = carbon_tracker.stop()
         logger.info(f"Total training emissions: {total_emissions:.4f} kg CO2eq")
+
+        # Cleanup distributed training
+        if args.distributed:
+            cleanup_distributed()
+            logger.info("Distributed training cleanup completed")
 
     return model
 

@@ -12,6 +12,7 @@ from typing import Optional, Dict, Any, List, Union, Callable
 
 import torch
 from torch.utils.data import Dataset, DataLoader, DistributedSampler
+import torch.distributed as dist
 from PIL import Image
 import torchvision.transforms as transforms
 
@@ -284,7 +285,7 @@ def get_alignment_dataloader(
     )
 
     sampler = None
-    if distributed and split == 'train':
+    if distributed and split == 'train' and dist.is_initialized():
         sampler = DistributedSampler(dataset, shuffle=True)
 
     return DataLoader(
@@ -316,7 +317,7 @@ def get_instruction_dataloader(
     )
 
     sampler = None
-    if distributed and split == 'train':
+    if distributed and split == 'train' and dist.is_initialized():
         sampler = DistributedSampler(dataset, shuffle=True)
 
     return DataLoader(
@@ -348,7 +349,7 @@ def get_reasoning_dataloader(
     )
 
     sampler = None
-    if distributed and split == 'train':
+    if distributed and split == 'train' and dist.is_initialized():
         sampler = DistributedSampler(dataset, shuffle=True)
 
     return DataLoader(

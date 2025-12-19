@@ -13,6 +13,7 @@ from typing import Optional, Dict, Any, List, Callable
 
 import torch
 from torch.utils.data import Dataset, DataLoader, DistributedSampler
+import torch.distributed as dist
 from PIL import Image
 import torchvision.transforms as transforms
 
@@ -425,7 +426,7 @@ def get_robot_selection_dataloader(
     )
 
     sampler = None
-    if distributed and split == 'train':
+    if distributed and split == 'train' and dist.is_initialized():
         sampler = DistributedSampler(dataset, shuffle=True)
 
     return DataLoader(
