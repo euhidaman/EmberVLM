@@ -271,6 +271,118 @@ If automated downloads fail, you can manually download datasets:
 
 > **Warning**: Full training requires substantial GPU memory. 2x NVIDIA A100 80GB GPUs are recommended. Training on smaller GPUs is possible with reduced batch sizes and gradient accumulation.
 
+### **IMPORTANT: Dynamic Training Orchestration (Research-Grade)**
+
+EmberVLM implements **intelligent, metric-driven training** that goes beyond fixed epoch counts. The system automatically monitors convergence signals and transitions between stages when the model has truly learned, not just when epochs are exhausted.
+
+#### **Training Philosophy**
+
+1. **Epoch count is NOT a sufficient stopping criterion**
+2. **Total loss alone does NOT indicate true learning**
+3. Every stage transition requires:
+   - Converged quantitative metrics
+   - Stable trends (not noisy improvements)
+   - Validated behavioral alignment
+   - Maintained representation quality
+
+#### **Automatic Convergence Detection**
+
+The training system tracks:
+
+**Quantitative Signals:**
+- Loss plateau detection (sliding window analysis)
+- Accuracy saturation across multiple validation windows
+- Gradient norm stability
+- Per-module parameter update magnitudes
+
+**Qualitative Behavioral Checks:**
+- Caption quality and visual grounding (Stage 1)
+- Instruction following fidelity (Stage 2)
+- Reasoning coherence and justification (Stage 3)
+- Attention map relevance
+- Feature collapse detection (SVD analysis)
+
+**Stability Metrics:**
+- Validation loss oscillation
+- Gradient variance
+- Adapter activation health
+- QK-norm statistics
+
+#### **Stage Transition Criteria**
+
+**Stage 1 → 2 (Alignment → Instruction):**
+- ✓ Contrastive loss plateaued across multiple windows
+- ✓ Image↔Text retrieval accuracy stabilized
+- ✓ Generated captions reference visual entities
+- ✓ Visual tokens consistently attended
+- ✓ No mode collapse in representations
+
+**Stage 2 → 3 (Instruction → Robot Selection):**
+- ✓ Instruction-following accuracy plateaued
+- ✓ Distillation loss converged relative to SFT loss
+- ✓ Responses instruction-faithful, not hallucinated
+- ✓ Attention maps show image relevance
+- ✓ Stage 1 alignment metrics maintained
+
+**Stage 3 → 4 (Robot Selection → Reasoning):**
+- ✓ Robot classification accuracy plateaued
+- ✓ Confidence calibration improved (ECE decreased)
+- ✓ Reasoning steps logically justify robot choice
+- ✓ No contradiction between reasoning and selection
+- ✓ Robust to counterfactual scenarios
+
+**The system will automatically transition early if criteria are met, preventing overfitting.**
+
+#### **Using the Training Orchestration System**
+
+The intelligent training system is integrated into the training pipeline. Three key components work together:
+
+1. **StageController** (`embervlm/training/stage_controller.py`): Monitors convergence across quantitative, behavioral, and stability dimensions
+2. **BehavioralAnalyzer** (`embervlm/training/behavioral_analyzer.py`): Validates model behavior beyond numerical metrics
+3. **MetricsTracker** (`embervlm/training/metrics_tracker.py`): Logs comprehensive training signals to WandB and local disk
+
+**Outputs:**
+- Convergence reports saved to `outputs/training_analysis/stage{N}_convergence_report.json`
+- Publication-quality visualizations (300 DPI) in `outputs/training_analysis/visualizations/`
+- Complete metrics history in `outputs/metrics/metrics_history.json`
+- All metrics logged to Weights & Biases in real-time
+
+**Key Logged Metrics:**
+```
+- stage{N}/convergence/quantitative (bool)
+- stage{N}/convergence/behavioral (bool)
+- stage{N}/convergence/stability (bool)
+- stage{N}/convergence/ready_for_transition (bool)
+- loss/* (decomposed components)
+- grad_norm/* (per-module gradients)
+- param_update/* (parameter update magnitudes)
+- attention/* (entropy, distribution)
+- vision_text_similarity/* (alignment metrics)
+```
+
+**Customizing Thresholds:**
+
+Convergence thresholds can be adjusted in `embervlm/training/stage_controller.py`:
+```python
+ConvergenceMetrics(
+    loss_plateau_threshold=0.01,      # 1% improvement threshold
+    loss_plateau_patience=5,           # Number of windows to check
+    accuracy_plateau_threshold=0.005,  # 0.5% improvement threshold
+    gradient_variance_threshold=0.3,   # Max allowed variance
+    validation_oscillation_threshold=0.1,  # Max oscillation amplitude
+)
+```
+
+Behavioral check thresholds in `embervlm/training/behavioral_analyzer.py`:
+```python
+# Stage 1 example thresholds
+{
+    'captions_reference_visual': visual_grounding_score > 0.6,  # 60%
+    'visual_tokens_attended': visual_attention_score > 0.15,    # 15%
+    'no_mode_collapse': not mode_collapse_detected,
+}
+```
+
 ### Hardware Requirements
 
 | Configuration | GPUs | VRAM | Training Time | Notes |
