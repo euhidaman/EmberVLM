@@ -210,13 +210,32 @@ class Stage1Trainer:
                     input_ids, pixel_values
                 )
 
+                # Adjust labels to match inputs_embeds length (account for visual tokens)
+                adjusted_labels = labels
+                if labels.size(1) != inputs_embeds.size(1):
+                    batch_size = labels.size(0)
+                    num_visual = inputs_embeds.size(1) - labels.size(1)
+
+                    # Create adjusted labels with -100 at visual token positions
+                    # Visual tokens are inserted at the beginning (position 0)
+                    adjusted_labels = torch.full(
+                        (batch_size, inputs_embeds.size(1)),
+                        -100,
+                        dtype=labels.dtype,
+                        device=labels.device
+                    )
+
+                    # Visual tokens get -100 (positions 0 to num_visual-1)
+                    # Copy original labels after visual tokens
+                    adjusted_labels[:, num_visual:] = labels
+
                 lm_outputs = model_ref.language_model(
                     inputs_embeds=inputs_embeds,
                     attention_mask=torch.ones(
                         inputs_embeds.size(0), inputs_embeds.size(1),
                         device=self.device, dtype=torch.long
                     ),
-                    labels=labels,
+                    labels=adjusted_labels,
                 )
 
                 captioning_loss = lm_outputs.get('loss', torch.tensor(0.0, device=self.device))
