@@ -117,7 +117,15 @@ class AlignmentDataset(BaseVLMDataset):
             logger.warning(f"No JSON files found in {self.data_dir} or its subdirectories")
             return samples
 
+        logger.info(f"Found {len(json_files)} JSON files to process")
+
         for json_file in json_files:
+            # Skip non-caption files (instances, keypoints, etc.)
+            if 'captions' not in json_file.name.lower():
+                continue
+
+            logger.info(f"Processing caption file: {json_file}")
+
             try:
                 with open(json_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
@@ -142,33 +150,62 @@ class AlignmentDataset(BaseVLMDataset):
             elif isinstance(data, dict):
                 # Handle COCO-style format
                 if 'annotations' in data and 'images' in data:
+                    logger.info(f"Processing COCO format: {len(data['images'])} images, {len(data['annotations'])} annotations")
+
                     # Build image id to filename mapping
                     image_map = {img['id']: img['file_name'] for img in data['images']}
+
+                    # Determine image directory (handle both 2014 and 2017 formats)
+                    image_dirs = []
+                    # Look in parent and parent's parent directories
+                    for search_dir in [json_parent, json_parent.parent]:
+                        for pattern in ['train2017', 'val2017', 'train2014', 'val2014', 'images']:
+                            found_dirs = list(search_dir.glob(pattern))
+                            image_dirs.extend(found_dirs)
+
+                    if not image_dirs:
+                        logger.warning(f"No image directories found for {json_file}")
+                        continue
+
+                    logger.info(f"Found image directories: {[str(d) for d in image_dirs]}")
+
                     for ann in data['annotations']:
                         image_id = ann.get('image_id')
+                        caption = ann.get('caption', '')
+
+                        if not caption:
+                            continue
+
                         if image_id in image_map:
                             image_filename = image_map[image_id]
-                            # Look for images in train2017, val2017, etc. subdirectories
+                            # Try to find image in any of the image directories
                             image_path = None
-                            for img_dir in json_parent.glob('*2017'):
+                            for img_dir in image_dirs:
                                 candidate = img_dir / image_filename
                                 if candidate.exists():
                                     image_path = str(candidate)
                                     break
+
                             if image_path:
                                 samples.append({
                                     'image': image_path,
-                                    'caption': ann.get('caption', ''),
+                                    'caption': caption,
                                 })
+
+                    logger.info(f"Loaded {len(samples)} caption samples from {json_file.name}")
+
                 # Handle simple dict format
                 elif 'annotations' in data:
                     for ann in data['annotations']:
+                        caption = ann.get('caption', '')
+                        if not caption:
+                            continue
                         image_path = ann.get('image', ann.get('file_name', ''))
                         if not os.path.isabs(image_path):
                             image_path = str(json_parent / image_path)
                         samples.append({
                             'image': image_path,
-                            'caption': ann.get('caption', ''),
+                            'caption': caption,
                         })
 
         # Filter by split if needed
@@ -212,7 +249,11 @@ class InstructionDataset(BaseVLMDataset):
             logger.warning(f"No JSON files found in {self.data_dir} or its subdirectories")
             return samples
 
+        logger.info(f"Found {len(json_files)} JSON files to process for instruction tuning")
+
         for json_file in json_files:
+            logger.info(f"Processing instruction file: {json_file}")
+
             try:
                 with open(json_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
@@ -221,6 +262,7 @@ class InstructionDataset(BaseVLMDataset):
                 continue
 
             json_parent = json_file.parent
+            file_samples = 0
 
             if isinstance(data, list):
                 for item in data:
@@ -247,21 +289,30 @@ class InstructionDataset(BaseVLMDataset):
                                     'instruction': instruction,
                                     'response': response,
                                 })
+                                file_samples += 1
                         elif 'instruction' in item or 'question' in item:
-                            samples.append({
-                                'image': image_path,
-                                'instruction': item.get('instruction', item.get('question', '')),
-                                'response': item.get('response', item.get('answer', '')),
-                            })
+                            instruction = item.get('instruction', item.get('question', ''))
+                            response = item.get('response', item.get('answer', ''))
+                            if instruction and response:
+                                samples.append({
+                                    'image': image_path,
+                                    'instruction': instruction,
+                                    'response': response,
+                                })
+                                file_samples += 1
                         # Fallback to caption data for instruction tuning
                         elif 'caption' in item or 'text' in item:
                             caption = item.get('caption', item.get('text', ''))
-                            # Convert caption to instruction format
-                            samples.append({
-                                'image': image_path,
-                                'instruction': 'Describe this image.',
-                                'response': caption,
-                            })
+                            if caption:
+                                # Convert caption to instruction format
+                                samples.append({
+                                    'image': image_path,
+                                    'instruction': 'Describe this image.',
+                                    'response': caption,
+                                })
+                                file_samples += 1
+
+            logger.info(f"Loaded {file_samples} instruction samples from {json_file.name}")
 
         # Split
         if self.split == 'train':
@@ -333,9 +384,6 @@ class ReasoningDataset(BaseVLMDataset):
             samples = samples[:int(len(samples) * 0.9)]
         else:
             samples = samples[int(len(samples) * 0.9):]
-
-        logger.info(f"Loaded {len(samples)} samples for {self.split} split from {self.data_dir}")
-        return samples
 
         logger.info(f"Loaded {len(samples)} samples for {self.split} split from {self.data_dir}")
         return samples
