@@ -110,26 +110,64 @@ class AlignmentDataset(BaseVLMDataset):
 
         samples = []
 
-        # Check for different data formats
-        json_files = list(self.data_dir.glob('*.json'))
+        # Recursively search for JSON files in subdirectories
+        json_files = list(self.data_dir.rglob('*.json'))
+
+        if not json_files:
+            logger.warning(f"No JSON files found in {self.data_dir} or its subdirectories")
+            return samples
 
         for json_file in json_files:
-            with open(json_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+            try:
+                with open(json_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+            except Exception as e:
+                logger.warning(f"Failed to load {json_file}: {e}")
+                continue
+
+            # Get the parent directory for resolving image paths
+            json_parent = json_file.parent
 
             if isinstance(data, list):
                 for item in data:
                     if 'image' in item and ('caption' in item or 'text' in item):
+                        image_path = item['image']
+                        # If image path is relative, resolve it relative to JSON location
+                        if not os.path.isabs(image_path):
+                            image_path = str(json_parent / image_path)
                         samples.append({
-                            'image': item['image'],
+                            'image': image_path,
                             'caption': item.get('caption', item.get('text', '')),
                         })
             elif isinstance(data, dict):
-                # Handle different JSON structures
-                if 'annotations' in data:
+                # Handle COCO-style format
+                if 'annotations' in data and 'images' in data:
+                    # Build image id to filename mapping
+                    image_map = {img['id']: img['file_name'] for img in data['images']}
                     for ann in data['annotations']:
+                        image_id = ann.get('image_id')
+                        if image_id in image_map:
+                            image_filename = image_map[image_id]
+                            # Look for images in train2017, val2017, etc. subdirectories
+                            image_path = None
+                            for img_dir in json_parent.glob('*2017'):
+                                candidate = img_dir / image_filename
+                                if candidate.exists():
+                                    image_path = str(candidate)
+                                    break
+                            if image_path:
+                                samples.append({
+                                    'image': image_path,
+                                    'caption': ann.get('caption', ''),
+                                })
+                # Handle simple dict format
+                elif 'annotations' in data:
+                    for ann in data['annotations']:
+                        image_path = ann.get('image', ann.get('file_name', ''))
+                        if not os.path.isabs(image_path):
+                            image_path = str(json_parent / image_path)
                         samples.append({
-                            'image': ann.get('image', ann.get('file_name', '')),
+                            'image': image_path,
                             'caption': ann.get('caption', ''),
                         })
 
@@ -167,19 +205,51 @@ class InstructionDataset(BaseVLMDataset):
 
         samples = []
 
-        json_files = list(self.data_dir.glob('*.json'))
+        # Recursively search for JSON files
+        json_files = list(self.data_dir.rglob('*.json'))
+
+        if not json_files:
+            logger.warning(f"No JSON files found in {self.data_dir} or its subdirectories")
+            return samples
 
         for json_file in json_files:
-            with open(json_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+            try:
+                with open(json_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+            except Exception as e:
+                logger.warning(f"Failed to load {json_file}: {e}")
+                continue
+
+            json_parent = json_file.parent
 
             if isinstance(data, list):
                 for item in data:
                     if 'image' in item:
+                        image_path = item['image']
+                        # Resolve relative image paths
+                        if not os.path.isabs(image_path):
+                            # For LLaVA, images might be in a separate directory
+                            image_path = str(json_parent / image_path)
+
                         # Try to load instruction-format data
-                        if 'instruction' in item or 'question' in item:
+                        if 'conversations' in item:
+                            # LLaVA format with conversations
+                            instruction = ""
+                            response = ""
+                            for conv in item['conversations']:
+                                if conv.get('from') == 'human':
+                                    instruction = conv.get('value', '')
+                                elif conv.get('from') == 'gpt':
+                                    response = conv.get('value', '')
+                            if instruction and response:
+                                samples.append({
+                                    'image': image_path,
+                                    'instruction': instruction,
+                                    'response': response,
+                                })
+                        elif 'instruction' in item or 'question' in item:
                             samples.append({
-                                'image': item['image'],
+                                'image': image_path,
                                 'instruction': item.get('instruction', item.get('question', '')),
                                 'response': item.get('response', item.get('answer', '')),
                             })
@@ -188,7 +258,7 @@ class InstructionDataset(BaseVLMDataset):
                             caption = item.get('caption', item.get('text', ''))
                             # Convert caption to instruction format
                             samples.append({
-                                'image': item['image'],
+                                'image': image_path,
                                 'instruction': 'Describe this image.',
                                 'response': caption,
                             })
@@ -227,17 +297,31 @@ class ReasoningDataset(BaseVLMDataset):
 
         samples = []
 
-        json_files = list(self.data_dir.glob('*.json'))
+        # Recursively search for JSON files
+        json_files = list(self.data_dir.rglob('*.json'))
+
+        if not json_files:
+            logger.warning(f"No JSON files found in {self.data_dir} or its subdirectories")
+            return samples
 
         for json_file in json_files:
-            with open(json_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+            try:
+                with open(json_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+            except Exception as e:
+                logger.warning(f"Failed to load {json_file}: {e}")
+                continue
+
+            json_parent = json_file.parent
 
             if isinstance(data, list):
                 for item in data:
                     if 'image' in item:
+                        image_path = item['image']
+                        if not os.path.isabs(image_path):
+                            image_path = str(json_parent / image_path)
                         samples.append({
-                            'image': item['image'],
+                            'image': image_path,
                             'instruction': item.get('instruction', ''),
                             'reasoning_chain': item.get('reasoning_chain', []),
                             'response': item.get('response', ''),
@@ -249,6 +333,9 @@ class ReasoningDataset(BaseVLMDataset):
             samples = samples[:int(len(samples) * 0.9)]
         else:
             samples = samples[int(len(samples) * 0.9):]
+
+        logger.info(f"Loaded {len(samples)} samples for {self.split} split from {self.data_dir}")
+        return samples
 
         logger.info(f"Loaded {len(samples)} samples for {self.split} split from {self.data_dir}")
         return samples
