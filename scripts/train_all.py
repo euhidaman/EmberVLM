@@ -184,6 +184,9 @@ def run_all_stages(args: argparse.Namespace):
                     tokenizer=tokenizer,
                     num_epochs=args.stage1_epochs,
                 )
+                # Unwrap model from DDP if needed
+                from embervlm.training.train_utils import unwrap_model
+                model = unwrap_model(model)
             else:
                 logger.warning("Stage 1 data not provided, skipping...")
 
@@ -209,6 +212,9 @@ def run_all_stages(args: argparse.Namespace):
                     tokenizer=tokenizer,
                     num_epochs=args.stage2_epochs,
                 )
+                # Unwrap model from DDP if needed
+                from embervlm.training.train_utils import unwrap_model
+                model = unwrap_model(model)
             else:
                 logger.warning("Stage 2 data not provided, skipping...")
 
@@ -241,6 +247,9 @@ def run_all_stages(args: argparse.Namespace):
                     tokenizer=tokenizer,
                     robot_epochs=args.stage3_robot_epochs,
                 )
+                # Unwrap model from DDP if needed
+                from embervlm.training.train_utils import unwrap_model
+                model = unwrap_model(model)
             else:
                 logger.warning("Stage 3 robot data not found, skipping...")
 
@@ -268,8 +277,15 @@ def run_all_stages(args: argparse.Namespace):
                     phase1_epochs=args.stage4_phase1_epochs,
                     phase2_epochs=args.stage4_phase2_epochs,
                 )
+                # Unwrap model from DDP if needed
+                from embervlm.training.train_utils import unwrap_model
+                model = unwrap_model(model)
             else:
                 logger.warning("Stage 4 data not provided, skipping...")
+
+        # Unwrap model before saving (in case it's still wrapped)
+        from embervlm.training.train_utils import unwrap_model
+        model = unwrap_model(model)
 
         # Save final model
         logger.info("="*60)
