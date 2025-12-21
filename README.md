@@ -282,20 +282,52 @@ If automated downloads fail, you can manually download datasets:
 ### Full Training Pipeline (All 4 Stages)
 
 ```bash
-# Full training with default configuration
+# Full training with ALL data paths specified (recommended for 2x A100 GPUs)
+torchrun --nproc_per_node=2 scripts/train_all.py \
+    --output_dir ./outputs \
+    --stage all \
+    --distributed \
+    --mixed_precision bf16 \
+    --batch_size 32 \
+    --learning_rate 2e-4 \
+    --gradient_accumulation 4 \
+    --save_steps 500 \
+    --log_steps 50 \
+    --stage1_data ./data/base_vlm \
+    --stage2_data ./data/base_vlm/llava_instruct \
+    --robot_data ./robot-selection-dataset \
+    --reasoning_data ./outputs/reasoning-data \
+    --stage1_epochs 3 \
+    --stage2_epochs 5 \
+    --stage3_robot_epochs 20 \
+    --stage4_phase1_epochs 5 \
+    --stage4_phase2_epochs 5
+
+# Single GPU training
 python scripts/train_all.py \
     --output_dir ./outputs \
     --stage all \
-    --batch_size 32 \
-    --learning_rate 2e-4 \
-    --distributed
+    --mixed_precision bf16 \
+    --batch_size 16 \
+    --gradient_accumulation 8 \
+    --stage1_data ./data/base_vlm \
+    --stage2_data ./data/base_vlm/llava_instruct \
+    --robot_data ./robot-selection-dataset
 
 # With custom configuration file
 python scripts/train_all.py \
     --output_dir ./outputs \
     --config configs/base.yaml \
-    --stage all
+    --stage all \
+    --stage1_data ./data/base_vlm \
+    --stage2_data ./data/base_vlm/llava_instruct \
+    --robot_data ./robot-selection-dataset
 ```
+
+**Important Notes:**
+- **Stage 1 & 2 require data paths**: If `--stage1_data` or `--stage2_data` are not provided, those stages will be skipped
+- **Stage 3 auto-creates data**: If robot data doesn't exist at the path, it will be auto-generated from `robot-selection-dataset/multi-robot-selection.json`
+- **Stage 4 is optional**: Reasoning data is generated during training if not provided
 
 **Expected Output:**
 ```
