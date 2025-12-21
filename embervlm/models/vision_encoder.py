@@ -320,15 +320,16 @@ class RepViTEncoder(nn.Module):
             self.backbone = timm.create_model(timm_model_name, pretrained=pretrained, num_classes=0)
 
             # Determine backbone output dimension based on model size
+            # Note: These are the actual output dimensions from the timm models
             model_dims = {
-                'repvit_m0_9': 256,
-                'repvit_m1_0': 256,
-                'repvit_m1_1': 320,
-                'repvit_m1_5': 384,
-                'repvit_m2_3': 512,
+                'repvit_m0_9': 384,  # Corrected: actual output is 384
+                'repvit_m1_0': 384,  # Corrected: actual output is 384
+                'repvit_m1_1': 384,
+                'repvit_m1_5': 512,
+                'repvit_m2_3': 640,
             }
             base_name = model_name.split('.')[0]
-            self.backbone_dim = model_dims.get(base_name, 256)
+            self.backbone_dim = model_dims.get(base_name, 384)
             print(f"Using timm model: {timm_model_name} with output_dim={self.backbone_dim}")
         else:
             raise ValueError(f"Unknown model: {model_name}. Use 'repvit_xxs' or timm model like 'repvit_m0_9'")
