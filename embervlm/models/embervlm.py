@@ -381,11 +381,44 @@ class EmberVLM(nn.Module):
         else:
             attention_mask = input_attention_mask
 
+        # Adjust labels to match inputs_embeds length
+        adjusted_labels = None
+        if labels is not None:
+            if labels.size(1) != inputs_embeds.size(1):
+                # Labels need to be extended to match inputs_embeds
+                batch_size = labels.size(0)
+                num_visual = inputs_embeds.size(1) - labels.size(1)
+                device = labels.device
+
+                # Determine image positions
+                if image_positions is None:
+                    image_positions = torch.zeros(batch_size, dtype=torch.long, device=device)
+
+                # Create adjusted labels with -100 at visual token positions
+                adjusted_labels = torch.full(
+                    (batch_size, inputs_embeds.size(1)),
+                    -100,
+                    dtype=labels.dtype,
+                    device=device
+                )
+
+                for i in range(batch_size):
+                    pos = image_positions[i].item()
+                    # Copy labels before image position
+                    if pos > 0:
+                        adjusted_labels[i, :pos] = labels[i, :pos]
+                    # Visual tokens get -100 (already set)
+                    # Copy labels after image position
+                    remaining = labels.size(1) - pos
+                    adjusted_labels[i, pos + num_visual:pos + num_visual + remaining] = labels[i, pos:]
+            else:
+                adjusted_labels = labels
+
         # Forward through language model
         lm_outputs = self.language_model(
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
-            labels=labels,
+            labels=adjusted_labels,
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,

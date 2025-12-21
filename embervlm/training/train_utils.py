@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.cuda.amp import GradScaler, autocast
+from torch.cuda.amp import GradScaler
 from typing import Optional, Dict, Any, Tuple, List, Union
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -302,11 +302,11 @@ def get_autocast_context(config: TrainingConfig):
         Autocast context
     """
     if config.mixed_precision == 'bf16':
-        return autocast(dtype=torch.bfloat16)
+        return torch.amp.autocast('cuda', dtype=torch.bfloat16)
     elif config.mixed_precision == 'fp16':
-        return autocast(dtype=torch.float16)
+        return torch.amp.autocast('cuda', dtype=torch.float16)
     else:
-        return torch.cuda.amp.autocast(enabled=False)
+        return torch.amp.autocast('cuda', enabled=False)
 
 
 def wrap_model_ddp(
