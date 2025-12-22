@@ -368,6 +368,13 @@ class Stage2Trainer:
                 # Compute accuracy (token-level)
                 logits = outputs['logits']
                 predictions = logits.argmax(dim=-1)
+
+                # Align predictions with labels length (handle visual token offset)
+                if predictions.size(1) != labels.size(1):
+                    # Predictions may be longer due to visual tokens
+                    seq_diff = predictions.size(1) - labels.size(1)
+                    predictions = predictions[:, seq_diff:]  # Skip visual token positions
+
                 mask = labels != -100
                 correct = ((predictions == labels) & mask).sum()
                 total = mask.sum()
