@@ -238,7 +238,6 @@ class Stage1Trainer:
                         device=self.device, dtype=torch.long
                     ),
                     labels=adjusted_labels,
-                    return_dict=True,
                 )
 
                 captioning_loss = lm_outputs.get('loss', torch.tensor(0.0, device=self.device))
