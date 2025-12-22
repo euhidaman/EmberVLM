@@ -303,11 +303,14 @@ class Stage1Trainer:
                 # Evaluation
                 if self.val_dataloader is not None and \
                    self.global_step % self.config.eval_steps == 0:
-                    self.evaluate()
+                    self.evaluate(eval_step=self.global_step)
 
     @torch.no_grad()
-    def evaluate(self):
+    def evaluate(self, eval_step: Optional[int] = None):
         """Evaluate on validation set."""
+        if eval_step is None:
+            eval_step = self.global_step
+
         self.model.eval()
 
         eval_metrics = MetricTracker()
@@ -342,7 +345,7 @@ class Stage1Trainer:
         avg_metrics = {f'val_{k}': v for k, v in avg_metrics.items()}
 
         if is_main_process():
-            self.wandb_logger.log(avg_metrics, step=self.global_step)
+            self.wandb_logger.log(avg_metrics, step=eval_step)
             logger.info(f"Validation metrics: {avg_metrics}")
 
         self.model.train()
@@ -395,6 +398,20 @@ class Stage1Trainer:
                 self.save_checkpoint()
 
                 barrier()
+
+        except Exception as e:
+            # Log error to WandB before crashing
+            error_msg = f"Training failed at epoch {epoch}, step {self.global_step}: {str(e)}"
+            logger.error(error_msg)
+
+            if is_main_process() and self.wandb_logger is not None:
+                self.wandb_logger.log({
+                    'error': error_msg,
+                    'error_type': type(e).__name__,
+                    'failed_at_step': self.global_step,
+                }, step=self.global_step)
+
+            raise  # Re-raise to preserve stack trace
 
         finally:
             if is_main_process():
