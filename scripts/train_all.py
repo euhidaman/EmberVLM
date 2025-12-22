@@ -202,6 +202,7 @@ def run_all_stages(args: argparse.Namespace):
                 'output_dir': str(output_dir / 'stage2'),
                 'batch_size': 64,
                 'num_training_steps': args.stage2_steps,
+                'find_unused_parameters': True,  # Some parameters may not be used in instruction tuning
             })
             stage2_config = TrainingConfig(**stage2_dict)
 
@@ -231,6 +232,7 @@ def run_all_stages(args: argparse.Namespace):
                 'output_dir': str(output_dir / 'stage3'),
                 'batch_size': 32,
                 'num_training_steps': args.stage3_steps,
+                'find_unused_parameters': True,  # Reasoning heads may not be used yet
             })
             stage3_config = TrainingConfig(**stage3_dict)
 
@@ -262,12 +264,14 @@ def run_all_stages(args: argparse.Namespace):
             logger.info("Stage 4: Chain-of-Thought Reasoning Integration")
             logger.info("="*60)
 
-            stage4_config = TrainingConfig(
-                **training_config.to_dict(),
-                output_dir=str(output_dir / 'stage4'),
-                batch_size=32,
-                num_training_steps=args.stage4_steps,
-            )
+            stage4_dict = training_config.to_dict()
+            stage4_dict.update({
+                'output_dir': str(output_dir / 'stage4'),
+                'batch_size': 32,
+                'num_training_steps': args.stage4_steps,
+                'find_unused_parameters': True,  # May have conditional parameter usage
+            })
+            stage4_config = TrainingConfig(**stage4_dict)
 
             reasoning_dir = args.reasoning_data or str(output_dir / 'reasoning-data')
 
