@@ -393,6 +393,17 @@ Behavioral check thresholds in `embervlm/training/behavioral_analyzer.py`:
 
 ### Full Training Pipeline (All 4 Stages)
 
+**IMPORTANT: For stable distributed training, set NCCL environment variables first:**
+```bash
+# Source NCCL environment settings to prevent timeout issues
+source scripts/set_nccl_env.sh
+
+# Or manually set them:
+export NCCL_ASYNC_ERROR_HANDLING=1
+export NCCL_TIMEOUT=1800  # 30 minutes
+export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+```
+
 ```bash
 # Full training with 2x A100 GPUs (RECOMMENDED)
 torchrun --nproc_per_node=2 scripts/train_all.py \
@@ -1171,6 +1182,63 @@ upload_to_huggingface(
 ## Troubleshooting
 
 ### Common Issues and Solutions
+
+#### NCCL Timeout / Distributed Training Hangs
+
+**Symptoms:** 
+```
+[Rank X] Watchdog caught collective operation timeout
+ProcessGroupNCCL's watchdog got stuck for 600 seconds
+```
+
+**Root Causes:**
+- Network communication issues between GPUs
+- GPU memory pressure causing slow operations
+- Mismatched collective operations between ranks
+
+**Solutions:**
+
+1. **Increase NCCL timeout (Quick fix):**
+```bash
+export NCCL_TIMEOUT=1800  # 30 minutes instead of 10
+export NCCL_ASYNC_ERROR_HANDLING=1
+export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+```
+
+2. **Use the provided NCCL setup script:**
+```bash
+source scripts/set_nccl_env.sh
+torchrun --nproc_per_node=2 scripts/train_all.py ...
+```
+
+3. **Reduce batch size and enable gradient accumulation:**
+```bash
+python scripts/train_all.py \
+    --batch_size 16 \
+    --gradient_accumulation 8
+```
+
+4. **Check GPU connectivity:**
+```bash
+# Verify NCCL can communicate between GPUs
+python -c "import torch; print(torch.cuda.nccl.version())"
+nvidia-smi topo -m  # Check GPU topology
+```
+
+5. **Disable unused parameter detection if not needed:**
+```python
+# In train_all.py, set find_unused_parameters=False
+stage2_dict.update({'find_unused_parameters': False})
+```
+
+6. **Resume from last checkpoint:**
+Training automatically saves checkpoints every 500 steps. To resume:
+```bash
+# Training will auto-resume from the latest checkpoint in output_dir
+torchrun --nproc_per_node=2 scripts/train_all.py \
+    --output_dir ./outputs \
+    --stage 2  # Continue from specific stage
+```
 
 #### CUDA Out of Memory
 

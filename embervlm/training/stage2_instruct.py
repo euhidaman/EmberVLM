@@ -332,12 +332,12 @@ class Stage2Trainer:
 
                 # Save checkpoint
                 if self.global_step % self.config.save_steps == 0:
+                    barrier()  # Sync before checkpoint
                     self.save_checkpoint()
+                    barrier()  # Sync after checkpoint
 
-                # Evaluation
-                if self.val_dataloader is not None and \
-                   self.global_step % self.config.eval_steps == 0:
-                    self.evaluate()
+        # Sync at end of epoch before evaluation
+        barrier()
 
     @torch.no_grad()
     def evaluate(self):
