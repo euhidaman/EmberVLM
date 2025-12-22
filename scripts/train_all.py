@@ -202,7 +202,7 @@ def run_all_stages(args: argparse.Namespace):
                 'output_dir': str(output_dir / 'stage2'),
                 'batch_size': 64,
                 'num_training_steps': args.stage2_steps,
-                'find_unused_parameters': False,  # All parameters should be used in instruction tuning
+                'find_unused_parameters': True,  # Reasoning heads not used in instruction tuning
             })
             stage2_config = TrainingConfig(**stage2_dict)
 
