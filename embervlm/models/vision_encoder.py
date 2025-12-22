@@ -399,21 +399,21 @@ class RepViTEncoder(nn.Module):
             features = self.backbone.forward_features(pixel_values)
 
         # features shape: [B, C, H, W]
-        features = self.ln_vision(features.permute(0, 2, 3, 1))  # [B, H, W, C]
-        features = features.permute(0, 3, 1, 2)  # [B, C, H, W]
-
-        # Adaptive pooling
+        # Adaptive pooling first (before normalization)
         pooled_features = self.adaptive_pool(features)  # [B, C, h, w]
 
-        # Reshape to sequence of tokens
+        # Reshape to sequence of tokens for normalization
         B, C, h, w = pooled_features.shape
         visual_tokens = pooled_features.permute(0, 2, 3, 1).reshape(B, h * w, C)
+
+        # Apply layer norm in the correct dimension
+        visual_tokens = self.ln_vision(visual_tokens)  # [B, h*w, C]
 
         # Project to output dimension
         visual_tokens = self.projection(visual_tokens)
 
-        # Global pooled output
-        pooled_output = F.adaptive_avg_pool2d(features, 1).flatten(1)
+        # Global pooled output (from original features, not pooled)
+        pooled_output = F.adaptive_avg_pool2d(features, 1).flatten(1)  # [B, C]
         pooled_output = self.projection[0](pooled_output)
 
         if return_dict:

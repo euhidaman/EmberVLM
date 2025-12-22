@@ -394,11 +394,75 @@ Behavioral check thresholds in `embervlm/training/behavioral_analyzer.py`:
 ### Full Training Pipeline (All 4 Stages)
 
 ```bash
-# Full training with ALL data paths specified (recommended for 2x A100 GPUs)
+# Full training with 2x A100 GPUs (RECOMMENDED)
 torchrun --nproc_per_node=2 scripts/train_all.py \
     --output_dir ./outputs \
     --stage all \
     --distributed \
+    --mixed_precision bf16 \
+    --batch_size 32 \
+    --learning_rate 2e-4 \
+    --gradient_accumulation 4 \
+    --save_steps 500 \
+    --log_steps 50 \
+    --stage1_data data/base_vlm \
+    --stage2_data data/base_vlm/llava \
+    --robot_data robot-selection-dataset \
+    --stage1_epochs 3 \
+    --stage2_epochs 5 \
+    --stage3_robot_epochs 20
+
+# Single GPU fallback (for limited VRAM)
+python scripts/train_all.py \
+    --output_dir ./outputs \
+    --stage all \
+    --mixed_precision bf16 \
+    --batch_size 16 \
+    --learning_rate 1e-4 \
+    --gradient_accumulation 8 \
+    --save_steps 500 \
+    --log_steps 50 \
+    --stage1_data data/base_vlm \
+    --stage2_data data/base_vlm/llava \
+    --robot_data robot-selection-dataset
+```
+
+**Important Notes:**
+- The `--nproc_per_node=2` specifies 2 GPUs per node
+- Data paths default to `data/base_vlm`, `data/base_vlm/llava`, and `robot-selection-dataset`
+- If data is not found at specified paths, that stage will be skipped
+- Make sure all datasets are properly downloaded before training (see [Dataset Setup](#dataset-setup))
+
+### Training Individual Stages
+
+```bash
+# Stage 1 only: Visual-Language Alignment (requires COCO, VQA, CC3M data)
+torchrun --nproc_per_node=2 scripts/train_all.py \
+    --stage 1 \
+    --distributed \
+    --stage1_data data/base_vlm \
+    --stage1_epochs 3
+
+# Stage 2 only: Instruction Tuning (requires LLaVA data)
+torchrun --nproc_per_node=2 scripts/train_all.py \
+    --stage 2 \
+    --distributed \
+    --stage2_data data/base_vlm/llava \
+    --stage2_epochs 5
+
+# Stage 3 only: Robot Selection (requires robot-selection-dataset)
+torchrun --nproc_per_node=2 scripts/train_all.py \
+    --stage 3 \
+    --distributed \
+    --robot_data robot-selection-dataset \
+    --stage3_robot_epochs 20
+
+# Stage 4 only: Reasoning Integration
+torchrun --nproc_per_node=2 scripts/train_all.py \
+    --stage 4 \
+    --distributed \
+    --reasoning_data reasoning-augmented-dataset
+```
     --mixed_precision bf16 \
     --batch_size 32 \
     --learning_rate 2e-4 \

@@ -211,7 +211,7 @@ class Stage1Trainer:
                 )
 
                 # Adjust labels to match inputs_embeds length (account for visual tokens)
-                adjusted_labels = labels
+                # Note: The language model will internally shift labels for causal LM
                 if labels.size(1) != inputs_embeds.size(1):
                     batch_size = labels.size(0)
                     num_visual = inputs_embeds.size(1) - labels.size(1)
@@ -228,6 +228,8 @@ class Stage1Trainer:
                     # Visual tokens get -100 (positions 0 to num_visual-1)
                     # Copy original labels after visual tokens
                     adjusted_labels[:, num_visual:] = labels
+                else:
+                    adjusted_labels = labels
 
                 lm_outputs = model_ref.language_model(
                     inputs_embeds=inputs_embeds,
@@ -236,6 +238,7 @@ class Stage1Trainer:
                         device=self.device, dtype=torch.long
                     ),
                     labels=adjusted_labels,
+                    return_dict=True,
                 )
 
                 captioning_loss = lm_outputs.get('loss', torch.tensor(0.0, device=self.device))

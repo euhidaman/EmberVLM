@@ -176,11 +176,12 @@ def run_all_stages(args: argparse.Namespace):
             })
             stage1_config = TrainingConfig(**stage1_dict)
 
-            if args.stage1_data:
+            stage1_data_path = Path(args.stage1_data) if args.stage1_data else None
+            if stage1_data_path and stage1_data_path.exists():
                 run_stage1_training(
                     model=model,
                     config=stage1_config,
-                    data_dir=args.stage1_data,
+                    data_dir=str(stage1_data_path),
                     tokenizer=tokenizer,
                     num_epochs=args.stage1_epochs,
                 )
@@ -188,7 +189,7 @@ def run_all_stages(args: argparse.Namespace):
                 from embervlm.training.train_utils import unwrap_model
                 model = unwrap_model(model)
             else:
-                logger.warning("Stage 1 data not provided, skipping...")
+                logger.warning(f"Stage 1 data not found at {stage1_data_path}, skipping...")
 
         # Stage 2: Instruction Tuning
         if args.stage in ['all', '2']:
@@ -204,11 +205,12 @@ def run_all_stages(args: argparse.Namespace):
             })
             stage2_config = TrainingConfig(**stage2_dict)
 
-            if args.stage2_data:
+            stage2_data_path = Path(args.stage2_data) if args.stage2_data else None
+            if stage2_data_path and stage2_data_path.exists():
                 run_stage2_training(
                     model=model,
                     config=stage2_config,
-                    data_dir=args.stage2_data,
+                    data_dir=str(stage2_data_path),
                     tokenizer=tokenizer,
                     num_epochs=args.stage2_epochs,
                 )
@@ -216,7 +218,7 @@ def run_all_stages(args: argparse.Namespace):
                 from embervlm.training.train_utils import unwrap_model
                 model = unwrap_model(model)
             else:
-                logger.warning("Stage 2 data not provided, skipping...")
+                logger.warning(f"Stage 2 data not found at {stage2_data_path}, skipping...")
 
         # Stage 3: Robot Selection Training
         if args.stage in ['all', '3']:
@@ -232,18 +234,19 @@ def run_all_stages(args: argparse.Namespace):
             })
             stage3_config = TrainingConfig(**stage3_dict)
 
-            robot_dir = args.robot_data or str(Path(__file__).parent.parent / 'robot-selection-dataset')
+            robot_dir = Path(args.robot_data) if args.robot_data else Path(Path(__file__).parent.parent / 'robot-selection-dataset')
 
             # Create robot selection data if needed
-            if not Path(robot_dir).exists():
+            if not robot_dir.exists():
+                logger.info(f"Creating robot selection dataset at {robot_dir}")
                 from embervlm.data.robot_loader import create_robot_selection_dataset
-                create_robot_selection_dataset(robot_dir)
+                create_robot_selection_dataset(str(robot_dir))
 
-            if Path(robot_dir).exists():
+            if robot_dir.exists():
                 run_stage3_training(
                     model=model,
                     config=stage3_config,
-                    robot_data_dir=robot_dir,
+                    robot_data_dir=str(robot_dir),
                     tokenizer=tokenizer,
                     robot_epochs=args.stage3_robot_epochs,
                 )
@@ -251,7 +254,7 @@ def run_all_stages(args: argparse.Namespace):
                 from embervlm.training.train_utils import unwrap_model
                 model = unwrap_model(model)
             else:
-                logger.warning("Stage 3 robot data not found, skipping...")
+                logger.warning(f"Stage 3 robot data not found at {robot_dir}, skipping...")
 
         # Stage 4: Reasoning Integration
         if args.stage in ['all', '4']:
@@ -343,11 +346,11 @@ def main():
                        help='Log metrics every N steps')
 
     # Data paths
-    parser.add_argument('--stage1_data', type=str, default=None,
+    parser.add_argument('--stage1_data', type=str, default='data/base_vlm',
                        help='Path to Stage 1 alignment data')
-    parser.add_argument('--stage2_data', type=str, default=None,
+    parser.add_argument('--stage2_data', type=str, default='data/base_vlm/llava',
                        help='Path to Stage 2 instruction data')
-    parser.add_argument('--robot_data', type=str, default=None,
+    parser.add_argument('--robot_data', type=str, default='robot-selection-dataset',
                        help='Path to robot selection data')
     parser.add_argument('--reasoning_data', type=str, default=None,
                        help='Path to reasoning augmented data')
