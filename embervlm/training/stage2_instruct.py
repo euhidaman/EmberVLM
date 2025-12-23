@@ -360,17 +360,18 @@ class Stage2Trainer:
                     avg_metrics = self.metric_tracker.get_average()
 
                     if is_main_process():
-                        self.wandb_logger.log_with_visualization(
-                            avg_metrics,
-                            step=self.global_step,
-                            stage_name="stage2",
-                        )
+                        if self.wandb_logger is not None:
+                            self.wandb_logger.log_with_visualization(
+                                avg_metrics,
+                                step=self.global_step,
+                                stage_name="stage2",
+                            )
                         progress_bar.set_postfix({
                             'loss': f"{avg_metrics['loss']:.4f}",
                         })
 
                         # Log gradient distribution periodically
-                        if self.global_step % 500 == 0:
+                        if self.global_step % 500 == 0 and self.wandb_logger is not None:
                             gradients = {}
                             for name, param in self.model.named_parameters():
                                 if param.grad is not None:
@@ -475,7 +476,8 @@ class Stage2Trainer:
         avg_metrics = {f'val_{k}': v for k, v in avg_metrics.items()}
 
         if is_main_process():
-            self.wandb_logger.log(avg_metrics, step=eval_step)
+            if self.wandb_logger is not None:
+                self.wandb_logger.log(avg_metrics, step=eval_step)
             logger.info(f"Validation: {avg_metrics}")
 
         self.model.train()
