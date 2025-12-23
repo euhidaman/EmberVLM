@@ -6,11 +6,48 @@ model artifacts, and visualizations.
 """
 
 import os
+import threading
 from typing import Optional, Dict, Any, List, Union
 from pathlib import Path
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def _init_wandb_with_timeout(timeout=30, **kwargs):
+    """
+    Initialize W&B with a timeout to prevent hanging.
+
+    Args:
+        timeout: Maximum seconds to wait for initialization
+        **kwargs: Arguments to pass to wandb.init()
+
+    Returns:
+        W&B run object or None if timeout/failure
+    """
+    import wandb
+
+    result = [None]
+    exception = [None]
+
+    def init_wandb():
+        try:
+            result[0] = wandb.init(**kwargs)
+        except Exception as e:
+            exception[0] = e
+
+    thread = threading.Thread(target=init_wandb, daemon=True)
+    thread.start()
+    thread.join(timeout=timeout)
+
+    if thread.is_alive():
+        logger.error(f"W&B initialization timed out after {timeout}s")
+        return None
+
+    if exception[0]:
+        raise exception[0]
+
+    return result[0]
 
 
 class WandbLogger:
@@ -42,13 +79,37 @@ class WandbLogger:
         self.entity = entity
         self.enabled = True
 
+        # Check if W&B is disabled via environment variable
+        import os as _os
+        if _os.environ.get('DISABLE_WANDB', '').lower() in ('1', 'true', 'yes'):
+            logger.info("W&B disabled via DISABLE_WANDB environment variable")
+            self.wandb = None
+            self.run = None
+            self.enabled = False
+            return
+
         try:
             import wandb
             self.wandb = wandb
 
-            # Initialize run with timeout protection
+            # Initialize run with timeout protection and fork-safe settings
             logger.info(f"Initializing W&B run: {name}")
-            self.run = wandb.init(
+
+            # Use thread-safe initialization and disable certain features that can hang
+            wandb_settings = wandb.Settings(
+                start_method="thread",
+                _disable_stats=True,  # Disable system stats collection
+                _disable_meta=True,   # Disable metadata collection
+            )
+
+            # Set timeout environment variable
+            import os as _os
+            _os.environ.setdefault('WANDB_INIT_TIMEOUT', '60')
+
+            # Try to initialize with timeout
+            logger.info("Calling wandb.init with 30s timeout...")
+            self.run = _init_wandb_with_timeout(
+                timeout=30,
                 project=project,
                 name=name,
                 config=config,
@@ -57,8 +118,11 @@ class WandbLogger:
                 tags=tags,
                 notes=notes,
                 mode=mode,
-                settings=wandb.Settings(start_method="thread"),  # Use thread instead of fork
+                settings=wandb_settings,
             )
+
+            if self.run is None:
+                raise RuntimeError("W&B init timed out or returned None")
 
             logger.info(f"Successfully initialized W&B run: {self.run.name}")
 
@@ -68,7 +132,7 @@ class WandbLogger:
             self.run = None
             self.enabled = False
         except Exception as e:
-            logger.error(f"Failed to initialize W&B: {e}", exc_info=True)
+            logger.error(f"Failed to initialize W&B: {e}. Continuing without W&B logging.")
             self.wandb = None
             self.run = None
             self.enabled = False
