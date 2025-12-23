@@ -158,24 +158,38 @@ class Stage1Trainer:
         self.contrastive_loss = ContrastiveLoss(temperature=0.07).to(self.device)
         logger.info("Contrastive loss initialized")
 
-        # Logging
+        # Logging - only main process initializes W&B and carbon tracker
         self.wandb_logger = None
         self.carbon_tracker = None
 
         if is_main_process():
             logger.info("Initializing W&B logger (main process)...")
-            from embervlm.monitoring.wandb_logger import EnhancedWandbLogger
-            self.wandb_logger = EnhancedWandbLogger(
-                project="embervlm",
-                name="stage1_alignment",
-                config=config.to_dict(),
-                output_dir=config.output_dir,
-            )
-            logger.info("W&B logger initialized")
+            try:
+                from embervlm.monitoring.wandb_logger import EnhancedWandbLogger
+                self.wandb_logger = EnhancedWandbLogger(
+                    project="embervlm",
+                    name="stage1_alignment",
+                    config=config.to_dict(),
+                    output_dir=config.output_dir,
+                )
+                logger.info("W&B logger initialized")
+            except Exception as e:
+                logger.warning(f"Failed to initialize W&B logger: {e}")
+                self.wandb_logger = None
 
             logger.info("Initializing carbon tracker...")
-            self.carbon_tracker = CarbonTracker(output_dir=config.output_dir)
-            logger.info("Carbon tracker initialized")
+            try:
+                self.carbon_tracker = CarbonTracker(output_dir=config.output_dir)
+                logger.info("Carbon tracker initialized")
+            except Exception as e:
+                logger.warning(f"Failed to initialize carbon tracker: {e}")
+                self.carbon_tracker = None
+
+        # Synchronize all ranks after logging initialization
+        if torch.distributed.is_initialized() and self.world_size > 1:
+            logger.info(f"[Rank {self.rank}] Waiting at post-logging barrier...")
+            torch.distributed.barrier()
+            logger.info(f"[Rank {self.rank}] Passed post-logging barrier")
 
         # Metrics
         self.metric_tracker = MetricTracker()
@@ -184,6 +198,8 @@ class Stage1Trainer:
         # Print info
         if is_main_process():
             print_trainable_parameters(self.model)
+
+        logger.info(f"[Rank {self.rank}] Stage1Trainer initialization complete")
 
     def train_epoch(self, epoch: int):
         """Train for one epoch."""
