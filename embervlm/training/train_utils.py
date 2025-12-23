@@ -325,7 +325,9 @@ def wrap_model_ddp(
     Returns:
         Wrapped model
     """
-    model = model.to(device)
+    # Model should already be on correct device, but ensure it
+    if not next(model.parameters()).is_cuda:
+        model = model.to(device)
 
     if config.distributed and get_world_size() > 1:
         model = DDP(

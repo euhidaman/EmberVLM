@@ -125,6 +125,13 @@ class Stage1Trainer:
         # Set seed
         set_seed(config.seed, self.rank)
 
+        # Ensure model is on correct device before DDP
+        model = model.to(self.device)
+
+        # Synchronize to ensure all ranks have model loaded
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+
         # Model
         self.model = wrap_model_ddp(model, config, self.device)
 

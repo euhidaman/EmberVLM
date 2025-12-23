@@ -144,6 +144,13 @@ class Stage2Trainer:
         # Set seed
         set_seed(config.seed, self.rank)
 
+        # Ensure model is on correct device before DDP
+        model = model.to(self.device)
+
+        # Synchronize to ensure all ranks have model loaded
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+
         # Model
         self.model = wrap_model_ddp(model, config, self.device)
 
@@ -374,12 +381,15 @@ class Stage2Trainer:
 
                 # Align predictions with labels length (handle visual token offset)
                 if predictions.size(1) != labels.size(1):
-                    # Predictions may be longer due to visual tokens
-                    seq_diff = predictions.size(1) - labels.size(1)
-                    predictions = predictions[:, seq_diff:]  # Skip visual token positions
+                    min_len = min(predictions.size(1), labels.size(1))
+                    # Truncate both to same length to avoid mismatch
+                    predictions = predictions[:, :min_len]
+                    labels_eval = labels[:, :min_len]
+                else:
+                    labels_eval = labels
 
-                mask = labels != -100
-                correct = ((predictions == labels) & mask).sum()
+                mask = labels_eval != -100
+                correct = ((predictions == labels_eval) & mask).sum()
                 total = mask.sum()
                 accuracy = correct.float() / total.float() if total > 0 else torch.tensor(0.0)
 

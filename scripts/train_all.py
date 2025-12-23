@@ -189,7 +189,14 @@ def run_all_stages(args: argparse.Namespace):
                 from embervlm.training.train_utils import unwrap_model
                 model = unwrap_model(model)
             else:
-                logger.warning(f"Stage 1 data not found at {stage1_data_path}, skipping...")
+                logger.warning(f"Stage 1 data not provided, skipping...")
+
+        # Clean up and sync before Stage 2
+        if args.stage in ['all', '2']:
+            import torch.distributed as dist
+            if dist.is_initialized():
+                dist.barrier()  # Synchronize all ranks
+                torch.cuda.empty_cache()  # Clear CUDA cache
 
         # Stage 2: Instruction Tuning
         if args.stage in ['all', '2']:
@@ -220,6 +227,13 @@ def run_all_stages(args: argparse.Namespace):
                 model = unwrap_model(model)
             else:
                 logger.warning(f"Stage 2 data not found at {stage2_data_path}, skipping...")
+
+        # Clean up and sync before Stage 3
+        if args.stage in ['all', '3']:
+            import torch.distributed as dist
+            if dist.is_initialized():
+                dist.barrier()  # Synchronize all ranks
+                torch.cuda.empty_cache()  # Clear CUDA cache
 
         # Stage 3: Robot Selection Training
         if args.stage in ['all', '3']:
