@@ -7,39 +7,62 @@ Generates conference-ready plots and attention visualizations logged to W&B.
 import torch
 import torch.nn.functional as F
 import numpy as np
+
+# Configure matplotlib for non-interactive use BEFORE importing pyplot
 import matplotlib
-matplotlib.use('Agg')  # Non-interactive backend
+matplotlib.use('Agg', force=True)  # Force non-interactive backend
+
 import matplotlib.pyplot as plt
-import seaborn as sns
-from typing import Dict, Any, Optional, List, Tuple
-import io
-from PIL import Image
-from pathlib import Path
 import logging
 
 logger = logging.getLogger(__name__)
 
-# Set style for publication-quality plots
-plt.style.use('seaborn-v0_8-paper')
-sns.set_palette("husl")
+# Try to import and configure seaborn
+try:
+    import seaborn as sns
+    sns.set_palette("husl")
+    logger.info("Seaborn configured successfully")
+except Exception as e:
+    logger.warning(f"Failed to configure seaborn: {e}")
+    sns = None
+
+# Try to set matplotlib style
+try:
+    plt.style.use('seaborn-v0_8-paper')
+except Exception as e:
+    logger.warning(f"Failed to set matplotlib style: {e}, using default")
+
+from typing import Dict, Any, Optional, List, Tuple
+import io
+from PIL import Image
+from pathlib import Path
 
 
 class TrainingVisualizer:
     """Generates publication-quality visualizations for W&B logging."""
 
     def __init__(self, output_dir: str = "./outputs/visualizations"):
+        logger.info(f"Initializing TrainingVisualizer with output_dir={output_dir}")
         self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Created output directory: {self.output_dir}")
+        except Exception as e:
+            logger.warning(f"Failed to create output directory: {e}")
 
         # Configure matplotlib for high-quality output
-        matplotlib.rcParams['figure.dpi'] = 300
-        matplotlib.rcParams['savefig.dpi'] = 300
-        matplotlib.rcParams['font.size'] = 10
-        matplotlib.rcParams['axes.labelsize'] = 11
-        matplotlib.rcParams['axes.titlesize'] = 12
-        matplotlib.rcParams['xtick.labelsize'] = 9
-        matplotlib.rcParams['ytick.labelsize'] = 9
-        matplotlib.rcParams['legend.fontsize'] = 9
+        try:
+            matplotlib.rcParams['figure.dpi'] = 300
+            matplotlib.rcParams['savefig.dpi'] = 300
+            matplotlib.rcParams['font.size'] = 10
+            matplotlib.rcParams['axes.labelsize'] = 11
+            matplotlib.rcParams['axes.titlesize'] = 12
+            matplotlib.rcParams['xtick.labelsize'] = 9
+            matplotlib.rcParams['ytick.labelsize'] = 9
+            matplotlib.rcParams['legend.fontsize'] = 9
+            logger.info("Matplotlib configured for high-quality output")
+        except Exception as e:
+            logger.warning(f"Failed to configure matplotlib: {e}")
 
     def visualize_attention_on_image(
         self,

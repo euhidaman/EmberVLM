@@ -46,7 +46,8 @@ class WandbLogger:
             import wandb
             self.wandb = wandb
 
-            # Initialize run
+            # Initialize run with timeout protection
+            logger.info(f"Initializing W&B run: {name}")
             self.run = wandb.init(
                 project=project,
                 name=name,
@@ -56,9 +57,10 @@ class WandbLogger:
                 tags=tags,
                 notes=notes,
                 mode=mode,
+                settings=wandb.Settings(start_method="thread"),  # Use thread instead of fork
             )
 
-            logger.info(f"Initialized W&B run: {self.run.name}")
+            logger.info(f"Successfully initialized W&B run: {self.run.name}")
 
         except ImportError:
             logger.warning("wandb not installed. Logging disabled.")
@@ -66,7 +68,7 @@ class WandbLogger:
             self.run = None
             self.enabled = False
         except Exception as e:
-            logger.warning(f"Failed to initialize W&B: {e}")
+            logger.error(f"Failed to initialize W&B: {e}", exc_info=True)
             self.wandb = None
             self.run = None
             self.enabled = False
@@ -383,11 +385,18 @@ class EnhancedWandbLogger(WandbLogger):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        # Initialize visualizer
-        from embervlm.monitoring.visualization import TrainingVisualizer
-        self.visualizer = TrainingVisualizer(
-            output_dir=kwargs.get('output_dir', './outputs/visualizations')
-        )
+        # Initialize visualizer with error handling
+        self.visualizer = None
+        try:
+            from embervlm.monitoring.visualization import TrainingVisualizer
+            logger.info("Initializing visualizer...")
+            self.visualizer = TrainingVisualizer(
+                output_dir=kwargs.get('output_dir', './outputs/visualizations')
+            )
+            logger.info("Visualizer initialized successfully")
+        except Exception as e:
+            logger.warning(f"Failed to initialize visualizer: {e}. Visualizations will be disabled.")
+            self.visualizer = None
 
         # Track metrics history for plotting
         self.metrics_history = {}
@@ -418,8 +427,8 @@ class EnhancedWandbLogger(WandbLogger):
         # Log basic metrics
         self.log(metrics, step=step, commit=False)
 
-        # Generate visualizations periodically
-        if step and step % 500 == 0 and len(self.metrics_history.get('loss', [])) > 100:
+        # Generate visualizations periodically (only if visualizer is available)
+        if self.visualizer and step and step % 500 == 0 and len(self.metrics_history.get('loss', [])) > 100:
             try:
                 # Loss decomposition plot
                 _, loss_img = self.visualizer.plot_loss_decomposition(
@@ -461,7 +470,7 @@ class EnhancedWandbLogger(WandbLogger):
             step: Training step
             stage_name: Stage name
         """
-        if not self.enabled:
+        if not self.enabled or not self.visualizer:
             return
 
         try:
@@ -487,7 +496,7 @@ class EnhancedWandbLogger(WandbLogger):
             step: Training step
             stage_name: Stage name
         """
-        if not self.enabled:
+        if not self.enabled or not self.visualizer:
             return
 
         try:
@@ -517,7 +526,7 @@ class EnhancedWandbLogger(WandbLogger):
             step: Training step
             stage_name: Stage name
         """
-        if not self.enabled:
+        if not self.enabled or not self.visualizer:
             return
 
         try:

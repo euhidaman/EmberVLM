@@ -154,13 +154,16 @@ class Stage1Trainer:
         self.scaler = get_grad_scaler(config)
 
         # Losses
+        logger.info("Initializing contrastive loss...")
         self.contrastive_loss = ContrastiveLoss(temperature=0.07).to(self.device)
+        logger.info("Contrastive loss initialized")
 
         # Logging
         self.wandb_logger = None
         self.carbon_tracker = None
 
         if is_main_process():
+            logger.info("Initializing W&B logger (main process)...")
             from embervlm.monitoring.wandb_logger import EnhancedWandbLogger
             self.wandb_logger = EnhancedWandbLogger(
                 project="embervlm",
@@ -168,7 +171,11 @@ class Stage1Trainer:
                 config=config.to_dict(),
                 output_dir=config.output_dir,
             )
+            logger.info("W&B logger initialized")
+
+            logger.info("Initializing carbon tracker...")
             self.carbon_tracker = CarbonTracker(output_dir=config.output_dir)
+            logger.info("Carbon tracker initialized")
 
         # Metrics
         self.metric_tracker = MetricTracker()
