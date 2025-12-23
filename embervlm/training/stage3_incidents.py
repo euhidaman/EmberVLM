@@ -227,7 +227,8 @@ class Stage3Trainer:
                     avg_metrics = self.metric_tracker.get_average()
 
                     if is_main_process():
-                        self.wandb_logger.log(avg_metrics, step=self.global_step)
+                        if self.wandb_logger is not None:
+                            self.wandb_logger.log(avg_metrics, step=self.global_step)
 
                         display_metrics = {k: f"{v:.4f}" for k, v in avg_metrics.items()
                                           if k != 'lr'}

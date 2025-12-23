@@ -329,7 +329,8 @@ class Stage1Trainer:
                     avg_metrics = self.metric_tracker.get_average()
 
                     if is_main_process():
-                        self.wandb_logger.log(avg_metrics, step=self.global_step)
+                        if self.wandb_logger is not None:
+                            self.wandb_logger.log(avg_metrics, step=self.global_step)
                         progress_bar.set_postfix({
                             'loss': f"{avg_metrics['loss']:.4f}",
                             'acc': f"{avg_metrics.get('acc_i2t', 0):.3f}",
@@ -386,7 +387,8 @@ class Stage1Trainer:
         avg_metrics = {f'val_{k}': v for k, v in avg_metrics.items()}
 
         if is_main_process():
-            self.wandb_logger.log(avg_metrics, step=eval_step)
+            if self.wandb_logger is not None:
+                self.wandb_logger.log(avg_metrics, step=eval_step)
             logger.info(f"Validation metrics: {avg_metrics}")
 
         self.model.train()
