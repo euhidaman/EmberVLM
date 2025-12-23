@@ -104,19 +104,37 @@ class Stage3Trainer:
         self.ce_weight = 0.6
         self.reasoning_consistency_weight = 0.4
 
-        # Logging
+        # Logging - only main process initializes W&B and carbon tracker
         self.wandb_logger = None
         self.carbon_tracker = None
 
         if is_main_process():
-            from embervlm.monitoring.wandb_logger import EnhancedWandbLogger
-            self.wandb_logger = EnhancedWandbLogger(
-                project="embervlm",
-                name="stage3_robot_selection",
-                config=config.to_dict(),
-                output_dir=config.output_dir,
-            )
-            self.carbon_tracker = CarbonTracker(output_dir=config.output_dir)
+            logger.info("Initializing W&B logger (main process)...")
+            try:
+                from embervlm.monitoring.wandb_logger import EnhancedWandbLogger
+                self.wandb_logger = EnhancedWandbLogger(
+                    project="embervlm",
+                    name="stage3_robot_selection",
+                    config=config.to_dict(),
+                    output_dir=config.output_dir,
+                )
+                logger.info("W&B logger initialized")
+            except Exception as e:
+                logger.warning(f"Failed to initialize W&B logger: {e}")
+                self.wandb_logger = None
+
+            try:
+                self.carbon_tracker = CarbonTracker(output_dir=config.output_dir)
+                logger.info("Carbon tracker initialized")
+            except Exception as e:
+                logger.warning(f"Failed to initialize carbon tracker: {e}")
+                self.carbon_tracker = None
+
+        # Synchronize all ranks after logging initialization
+        if torch.distributed.is_initialized() and self.world_size > 1:
+            logger.info(f"[Rank {self.rank}] Waiting at post-logging barrier...")
+            torch.distributed.barrier()
+            logger.info(f"[Rank {self.rank}] Passed post-logging barrier")
 
         self.metric_tracker = MetricTracker()
         self.global_step = 0
