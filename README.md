@@ -395,8 +395,6 @@ Behavioral check thresholds in `embervlm/training/behavioral_analyzer.py`:
 
 **IMPORTANT: For stable distributed training, set NCCL environment variables first:**
 ```bash
-# Source NCCL environment settings to prevent timeout issues
-source scripts/set_nccl_env.sh
 
 # Or manually set them:
 export NCCL_ASYNC_ERROR_HANDLING=1
@@ -1207,7 +1205,6 @@ export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 
 2. **Use the provided NCCL setup script:**
 ```bash
-source scripts/set_nccl_env.sh
 torchrun --nproc_per_node=2 scripts/train_all.py ...
 ```
 

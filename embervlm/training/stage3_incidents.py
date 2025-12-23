@@ -63,11 +63,20 @@ class Stage3Trainer:
         set_seed(config.seed, self.rank)
 
         # Ensure model is on correct device before DDP
-        model = model.to(self.device)
+        try:
+            model = model.to(self.device)
+            torch.cuda.synchronize()  # Ensure CUDA operations complete
+        except RuntimeError as e:
+            logger.error(f"[Rank {self.rank}] Failed to move model to device: {e}")
+            raise
 
         # Synchronize to ensure all ranks have model loaded
-        if torch.distributed.is_initialized():
-            torch.distributed.barrier()
+        if torch.distributed.is_initialized() and self.world_size > 1:
+            try:
+                torch.distributed.barrier()
+            except Exception as e:
+                logger.error(f"[Rank {self.rank}] Barrier failed: {e}")
+                raise
 
         # Model
         self.model = wrap_model_ddp(model, config, self.device)
@@ -100,10 +109,12 @@ class Stage3Trainer:
         self.carbon_tracker = None
 
         if is_main_process():
-            self.wandb_logger = WandbLogger(
+            from embervlm.monitoring.wandb_logger import EnhancedWandbLogger
+            self.wandb_logger = EnhancedWandbLogger(
                 project="embervlm",
                 name="stage3_robot_selection",
                 config=config.to_dict(),
+                output_dir=config.output_dir,
             )
             self.carbon_tracker = CarbonTracker(output_dir=config.output_dir)
 

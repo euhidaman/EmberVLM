@@ -372,3 +372,179 @@ def create_training_dashboard(
             goal='minimize',
         )
 
+
+class EnhancedWandbLogger(WandbLogger):
+    """
+    Enhanced W&B logger with comprehensive visualizations.
+
+    Adds publication-quality plots, attention maps, and convergence analysis.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        # Initialize visualizer
+        from embervlm.monitoring.visualization import TrainingVisualizer
+        self.visualizer = TrainingVisualizer(
+            output_dir=kwargs.get('output_dir', './outputs/visualizations')
+        )
+
+        # Track metrics history for plotting
+        self.metrics_history = {}
+
+    def log_with_visualization(
+        self,
+        metrics: Dict[str, Any],
+        step: Optional[int] = None,
+        stage_name: str = "training",
+        commit: bool = True,
+    ):
+        """
+        Log metrics and generate visualizations.
+
+        Args:
+            metrics: Dictionary of metrics
+            step: Training step
+            stage_name: Name of training stage
+            commit: Whether to commit
+        """
+        # Update history
+        for key, value in metrics.items():
+            if isinstance(value, (int, float)):
+                if key not in self.metrics_history:
+                    self.metrics_history[key] = []
+                self.metrics_history[key].append(value)
+
+        # Log basic metrics
+        self.log(metrics, step=step, commit=False)
+
+        # Generate visualizations periodically
+        if step and step % 500 == 0 and len(self.metrics_history.get('loss', [])) > 100:
+            try:
+                # Loss decomposition plot
+                _, loss_img = self.visualizer.plot_loss_decomposition(
+                    self.metrics_history,
+                    stage_name,
+                    save_path=str(self.visualizer.output_dir / f"loss_decomp_step{step}.png")
+                )
+                self.log_image(f"{stage_name}/loss_decomposition", loss_img, step=step)
+
+                # Convergence analysis
+                _, conv_img = self.visualizer.plot_convergence_analysis(
+                    self.metrics_history,
+                    stage_name,
+                    save_path=str(self.visualizer.output_dir / f"convergence_step{step}.png")
+                )
+                self.log_image(f"{stage_name}/convergence_analysis", conv_img, step=step)
+
+            except Exception as e:
+                logger.warning(f"Failed to generate visualization: {e}")
+
+        if commit:
+            self.wandb.log({}, commit=True)
+
+    def log_attention_visualization(
+        self,
+        image: Any,
+        attention_map: Any,
+        text_tokens: List[str],
+        step: int,
+        stage_name: str = "training",
+    ):
+        """
+        Log attention map overlaid on image.
+
+        Args:
+            image: Input image tensor
+            attention_map: Attention weights
+            text_tokens: List of text tokens
+            step: Training step
+            stage_name: Stage name
+        """
+        if not self.enabled:
+            return
+
+        try:
+            _, attn_img = self.visualizer.visualize_attention_on_image(
+                image, attention_map, text_tokens,
+                save_path=str(self.visualizer.output_dir / f"attention_step{step}.png")
+            )
+            self.log_image(f"{stage_name}/attention_visualization", attn_img, step=step)
+        except Exception as e:
+            logger.warning(f"Failed to log attention visualization: {e}")
+
+    def log_gradient_distribution(
+        self,
+        gradients: Dict[str, Any],
+        step: int,
+        stage_name: str = "training",
+    ):
+        """
+        Log gradient distribution across modules.
+
+        Args:
+            gradients: Dictionary of module gradients
+            step: Training step
+            stage_name: Stage name
+        """
+        if not self.enabled:
+            return
+
+        try:
+            _, grad_img = self.visualizer.plot_gradient_distribution(
+                gradients, step,
+                save_path=str(self.visualizer.output_dir / f"gradients_step{step}.png")
+            )
+            self.log_image(f"{stage_name}/gradient_distribution", grad_img, step=step)
+        except Exception as e:
+            logger.warning(f"Failed to log gradient distribution: {e}")
+
+    def log_confusion_matrix(
+        self,
+        predictions: Any,
+        labels: Any,
+        class_names: List[str],
+        step: int,
+        stage_name: str = "training",
+    ):
+        """
+        Log confusion matrix for classification tasks.
+
+        Args:
+            predictions: Predicted class indices
+            labels: True class indices
+            class_names: List of class names
+            step: Training step
+            stage_name: Stage name
+        """
+        if not self.enabled:
+            return
+
+        try:
+            import numpy as np
+
+            # Convert to numpy
+            if hasattr(predictions, 'cpu'):
+                pred_np = predictions.cpu().numpy()
+            else:
+                pred_np = np.array(predictions)
+
+            if hasattr(labels, 'cpu'):
+                label_np = labels.cpu().numpy()
+            else:
+                label_np = np.array(labels)
+
+            _, cm_img = self.visualizer.plot_confusion_matrix(
+                pred_np, label_np, class_names, stage_name,
+                save_path=str(self.visualizer.output_dir / f"confusion_matrix_step{step}.png")
+            )
+            self.log_image(f"{stage_name}/confusion_matrix", cm_img, step=step)
+        except Exception as e:
+            logger.warning(f"Failed to log confusion matrix: {e}")
+
+    def finish(self):
+        """Clean up resources and finish run."""
+        if self.visualizer:
+            self.visualizer.close()
+        super().finish()
+

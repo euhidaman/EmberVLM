@@ -10,6 +10,7 @@ import logging
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -145,11 +146,20 @@ class Stage2Trainer:
         set_seed(config.seed, self.rank)
 
         # Ensure model is on correct device before DDP
-        model = model.to(self.device)
+        try:
+            model = model.to(self.device)
+            torch.cuda.synchronize()  # Ensure CUDA operations complete
+        except RuntimeError as e:
+            logger.error(f"[Rank {self.rank}] Failed to move model to device: {e}")
+            raise
 
         # Synchronize to ensure all ranks have model loaded
-        if torch.distributed.is_initialized():
-            torch.distributed.barrier()
+        if torch.distributed.is_initialized() and self.world_size > 1:
+            try:
+                torch.distributed.barrier()
+            except Exception as e:
+                logger.error(f"[Rank {self.rank}] Barrier failed: {e}")
+                raise
 
         # Model
         self.model = wrap_model_ddp(model, config, self.device)
@@ -189,10 +199,12 @@ class Stage2Trainer:
         self.carbon_tracker = None
 
         if is_main_process():
-            self.wandb_logger = WandbLogger(
+            from embervlm.monitoring.wandb_logger import EnhancedWandbLogger
+            self.wandb_logger = EnhancedWandbLogger(
                 project="embervlm",
                 name="stage2_instruct",
                 config=config.to_dict(),
+                output_dir=config.output_dir,
             )
             self.carbon_tracker = CarbonTracker(output_dir=config.output_dir)
 
@@ -330,10 +342,25 @@ class Stage2Trainer:
                     avg_metrics = self.metric_tracker.get_average()
 
                     if is_main_process():
-                        self.wandb_logger.log(avg_metrics, step=self.global_step)
+                        self.wandb_logger.log_with_visualization(
+                            avg_metrics,
+                            step=self.global_step,
+                            stage_name="stage2",
+                        )
                         progress_bar.set_postfix({
                             'loss': f"{avg_metrics['loss']:.4f}",
                         })
+
+                        # Log gradient distribution periodically
+                        if self.global_step % 500 == 0:
+                            gradients = {}
+                            for name, param in self.model.named_parameters():
+                                if param.grad is not None:
+                                    gradients[name] = param.grad
+                            if gradients:
+                                self.wandb_logger.log_gradient_distribution(
+                                    gradients, self.global_step, "stage2"
+                                )
 
                     self.metric_tracker.reset()
 
@@ -355,11 +382,15 @@ class Stage2Trainer:
         self.model.eval()
         eval_metrics = MetricTracker()
 
-        for batch in tqdm(
+        # Track for visualization (sample 3 random indices)
+        num_batches = len(self.val_dataloader)
+        vis_indices = set(np.random.choice(num_batches, min(3, num_batches), replace=False)) if is_main_process() else set()
+
+        for batch_idx, batch in enumerate(tqdm(
             self.val_dataloader,
             desc="Evaluating",
             disable=not is_main_process(),
-        ):
+        )):
             pixel_values = batch['pixel_values'].to(self.device)
             input_ids = batch['input_ids'].to(self.device)
             attention_mask = batch['attention_mask'].to(self.device)
@@ -371,6 +402,7 @@ class Stage2Trainer:
                     pixel_values=pixel_values,
                     attention_mask=attention_mask,
                     labels=labels,
+                    return_dict=True,
                 )
 
                 loss = outputs['loss']
@@ -392,6 +424,29 @@ class Stage2Trainer:
                 correct = ((predictions == labels_eval) & mask).sum()
                 total = mask.sum()
                 accuracy = correct.float() / total.float() if total > 0 else torch.tensor(0.0)
+
+                # Visualize attention for random samples
+                if batch_idx in vis_indices and is_main_process():
+                    try:
+                        # Get attention weights if available
+                        if 'attentions' in outputs or hasattr(outputs, 'attentions'):
+                            attentions = outputs.get('attentions') or outputs.attentions
+                            if attentions is not None and len(attentions) > 0:
+                                # Use last layer attention
+                                attn = attentions[-1][0]  # [num_heads, seq_len, seq_len]
+
+                                # Decode tokens for caption
+                                text_tokens = self.tokenizer.convert_ids_to_tokens(input_ids[0][:20].tolist())
+
+                                self.wandb_logger.log_attention_visualization(
+                                    image=pixel_values[0],
+                                    attention_map=attn,
+                                    text_tokens=text_tokens,
+                                    step=eval_step,
+                                    stage_name="stage2",
+                                )
+                    except Exception as e:
+                        logger.debug(f"Failed to visualize attention: {e}")
 
             eval_metrics.update({
                 'loss': loss.item(),
