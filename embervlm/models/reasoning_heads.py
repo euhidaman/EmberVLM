@@ -44,11 +44,25 @@ class ReasoningAttention(nn.Module):
         qkv = qkv.permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
 
-        # Attention scores
+        # Attention scores: [batch_size, num_heads, seq_len, seq_len]
         attn = torch.matmul(q, k.transpose(-2, -1)) * self.scale
 
         if attention_mask is not None:
-            attn = attn + attention_mask
+            # attention_mask shape: [batch_size, seq_len] or [batch_size, 1, 1, seq_len]
+            # Need to broadcast to [batch_size, num_heads, seq_len, seq_len]
+            if attention_mask.dim() == 2:
+                # Convert [B, seq_len] to [B, 1, 1, seq_len] then broadcast
+                attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
+
+            # Create causal mask: [1, 1, seq_len, seq_len]
+            causal_mask = torch.triu(
+                torch.ones(seq_len, seq_len, device=x.device, dtype=x.dtype) * float('-inf'),
+                diagonal=1
+            ).unsqueeze(0).unsqueeze(0)
+
+            # Combine masks: broadcast attention_mask and add causal mask
+            mask = attention_mask + causal_mask
+            attn = attn + mask
 
         attn = F.softmax(attn, dim=-1, dtype=torch.float32).to(x.dtype)
         attn = self.dropout(attn)

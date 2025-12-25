@@ -170,12 +170,10 @@ class Stage1Trainer:
         if is_main_process():
             logger.info("Initializing W&B logger (main process)...")
             try:
-                from embervlm.monitoring.wandb_logger import EnhancedWandbLogger
-                self.wandb_logger = EnhancedWandbLogger(
+                self.wandb_logger = WandbLogger(
                     project="embervlm",
                     name="stage1_alignment",
                     config=config.to_dict(),
-                    output_dir=config.output_dir,
                 )
                 logger.info("W&B logger initialized")
             except Exception as e:
