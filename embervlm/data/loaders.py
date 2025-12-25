@@ -101,10 +101,10 @@ class BaseVLMDataset(Dataset):
 
 
 class AlignmentDataset(BaseVLMDataset):
-    """Dataset for Stage 1 visual-language alignment."""
+    """Dataset for Stage 1 visual-language alignment - supports multiple dataset formats."""
 
     def _load_data(self) -> List[Dict[str, Any]]:
-        """Load image-caption pairs."""
+        """Load image-text pairs from multiple dataset formats."""
         import logging
         logger = logging.getLogger(__name__)
 
@@ -119,12 +119,16 @@ class AlignmentDataset(BaseVLMDataset):
 
         logger.info(f"Found {len(json_files)} JSON files to process")
 
+        # Skip certain files that are not data annotations
+        skip_patterns = ['download_summary', 'metadata', 'info', 'license']
+
         for json_file in json_files:
-            # Skip non-caption files (instances, keypoints, etc.)
-            if 'captions' not in json_file.name.lower():
+            # Skip metadata files
+            if any(pattern in json_file.name.lower() for pattern in skip_patterns):
+                logger.debug(f"Skipping metadata file: {json_file.name}")
                 continue
 
-            logger.info(f"Processing caption file: {json_file}")
+            logger.info(f"Processing file: {json_file}")
 
             try:
                 with open(json_file, 'r', encoding='utf-8') as f:
@@ -135,29 +139,49 @@ class AlignmentDataset(BaseVLMDataset):
 
             # Get the parent directory for resolving image paths
             json_parent = json_file.parent
+            before_count = len(samples)
 
             if isinstance(data, list):
+                # Handle list format (LLaVA, CC3M, etc.)
                 for item in data:
-                    if 'image' in item and ('caption' in item or 'text' in item):
+                    text = None
+                    image_path = None
+
+                    # Extract text (caption, question+answer, instruction, etc.)
+                    if 'caption' in item:
+                        text = item['caption']
+                    elif 'text' in item:
+                        text = item['text']
+                    elif 'question' in item and 'answer' in item:
+                        text = f"Question: {item['question']} Answer: {item['answer']}"
+                    elif 'question' in item:
+                        text = item['question']
+
+                    # Extract image path
+                    if 'image' in item:
                         image_path = item['image']
-                        # If image path is relative, resolve it relative to JSON location
+                    elif 'image_id' in item:
+                        image_path = f"{item['image_id']}.jpg"
+                    elif 'file_name' in item:
+                        image_path = item['file_name']
+
+                    if text and image_path:
                         if not os.path.isabs(image_path):
                             image_path = str(json_parent / image_path)
                         samples.append({
                             'image': image_path,
-                            'caption': item.get('caption', item.get('text', '')),
+                            'caption': text,
                         })
-            elif isinstance(data, dict):
-                # Handle COCO-style format
-                if 'annotations' in data and 'images' in data:
-                    logger.info(f"Processing COCO format: {len(data['images'])} images, {len(data['annotations'])} annotations")
 
-                    # Build image id to filename mapping
+            elif isinstance(data, dict):
+                # ===== COCO Captions Format =====
+                if 'annotations' in data and 'images' in data and any('caption' in ann for ann in data['annotations'][:5]):
+                    logger.info(f"Detected COCO Captions format: {len(data['images'])} images, {len(data['annotations'])} annotations")
+
                     image_map = {img['id']: img['file_name'] for img in data['images']}
 
-                    # Determine image directory (handle both 2014 and 2017 formats)
+                    # Find image directories
                     image_dirs = []
-                    # Look in parent and parent's parent directories
                     for search_dir in [json_parent, json_parent.parent]:
                         for pattern in ['train2017', 'val2017', 'train2014', 'val2014', 'images']:
                             found_dirs = list(search_dir.glob(pattern))
@@ -165,48 +189,178 @@ class AlignmentDataset(BaseVLMDataset):
 
                     if not image_dirs:
                         logger.warning(f"No image directories found for {json_file}")
-                        continue
+                    else:
+                        logger.info(f"Found image directories: {[str(d) for d in image_dirs]}")
 
-                    logger.info(f"Found image directories: {[str(d) for d in image_dirs]}")
+                        for ann in data['annotations']:
+                            image_id = ann.get('image_id')
+                            caption = ann.get('caption', '')
 
-                    for ann in data['annotations']:
-                        image_id = ann.get('image_id')
-                        caption = ann.get('caption', '')
+                            if caption and image_id in image_map:
+                                image_filename = image_map[image_id]
+                                image_path = None
+                                for img_dir in image_dirs:
+                                    candidate = img_dir / image_filename
+                                    if candidate.exists():
+                                        image_path = str(candidate)
+                                        break
 
-                        if not caption:
-                            continue
+                                if image_path:
+                                    samples.append({
+                                        'image': image_path,
+                                        'caption': caption,
+                                    })
 
-                        if image_id in image_map:
-                            image_filename = image_map[image_id]
-                            # Try to find image in any of the image directories
-                            image_path = None
-                            for img_dir in image_dirs:
-                                candidate = img_dir / image_filename
-                                if candidate.exists():
-                                    image_path = str(candidate)
-                                    break
+                # ===== VQA Format (questions + annotations) =====
+                elif 'questions' in data or ('annotations' in data and any('question' in ann or 'answer' in ann for ann in data.get('annotations', [])[:5])):
+                    logger.info(f"Detected VQA format")
 
-                            if image_path:
-                                samples.append({
-                                    'image': image_path,
-                                    'caption': caption,
-                                })
+                    # VQA v2 format has separate questions and annotations
+                    questions = data.get('questions', data.get('annotations', []))
 
-                    logger.info(f"Loaded {len(samples)} caption samples from {json_file.name}")
+                    # Find image directory
+                    image_dirs = []
+                    for search_dir in [json_parent, json_parent.parent]:
+                        for pattern in ['train2014', 'val2014', 'test2015', 'train2017', 'val2017', 'images']:
+                            found_dirs = list(search_dir.glob(pattern))
+                            image_dirs.extend(found_dirs)
 
-                # Handle simple dict format
-                elif 'annotations' in data:
-                    for ann in data['annotations']:
-                        caption = ann.get('caption', '')
-                        if not caption:
-                            continue
-                        image_path = ann.get('image', ann.get('file_name', ''))
-                        if not os.path.isabs(image_path):
-                            image_path = str(json_parent / image_path)
-                        samples.append({
-                            'image': image_path,
-                            'caption': caption,
-                        })
+                    if not image_dirs:
+                        # Try COCO directory structure
+                        coco_dir = self.data_dir / 'coco'
+                        if coco_dir.exists():
+                            for pattern in ['train2014', 'val2014', 'train2017', 'val2017']:
+                                found_dirs = list(coco_dir.glob(pattern))
+                                image_dirs.extend(found_dirs)
+
+                    for item in questions:
+                        question = item.get('question', '')
+                        answer = item.get('answer', item.get('multiple_choice_answer', ''))
+                        image_id = item.get('image_id', '')
+
+                        if question:
+                            # Construct text as Q&A pair or just question
+                            if answer:
+                                text = f"Question: {question} Answer: {answer}"
+                            else:
+                                text = f"Question: {question}"
+
+                            # Find image file
+                            image_filename = f"COCO_train2014_{image_id:012d}.jpg" if image_id else None
+                            if not image_filename and 'image_name' in item:
+                                image_filename = item['image_name']
+
+                            if image_filename and image_dirs:
+                                for img_dir in image_dirs:
+                                    candidate = img_dir / image_filename
+                                    if candidate.exists():
+                                        samples.append({
+                                            'image': str(candidate),
+                                            'caption': text,
+                                        })
+                                        break
+
+                # ===== GQA Format =====
+                elif any(key in data for key in list(data.keys())[:10]) and isinstance(list(data.values())[0], dict):
+                    # GQA is dict of dicts: {question_id: {question, answer, imageId, ...}}
+                    logger.info(f"Detected GQA format: {len(data)} questions")
+
+                    # Find GQA images directory
+                    image_dirs = []
+                    for search_dir in [json_parent, json_parent.parent]:
+                        for pattern in ['images', 'allImages']:
+                            found_dirs = list(search_dir.glob(pattern))
+                            image_dirs.extend(found_dirs)
+
+                    for qid, item in list(data.items())[:100000]:  # Limit for memory
+                        question = item.get('question', '')
+                        answer = item.get('answer', '')
+                        image_id = item.get('imageId', '')
+
+                        if question and image_id:
+                            text = f"Question: {question} Answer: {answer}" if answer else f"Question: {question}"
+                            image_filename = f"{image_id}.jpg"
+
+                            if image_dirs:
+                                for img_dir in image_dirs:
+                                    candidate = img_dir / image_filename
+                                    if candidate.exists():
+                                        samples.append({
+                                            'image': str(candidate),
+                                            'caption': text,
+                                        })
+                                        break
+
+                # ===== RefCOCO Format =====
+                elif 'refs' in data or any('ref_id' in str(k) for k in list(data.keys())[:5]):
+                    logger.info(f"Detected RefCOCO format")
+
+                    refs = data.get('refs', data.get('annotations', []))
+
+                    # Find image directory (RefCOCO uses COCO images)
+                    image_dirs = []
+                    coco_dir = self.data_dir / 'coco'
+                    if coco_dir.exists():
+                        for pattern in ['train2014', 'train2017', 'val2014', 'val2017']:
+                            found_dirs = list(coco_dir.glob(pattern))
+                            image_dirs.extend(found_dirs)
+
+                    for ref in refs:
+                        # RefCOCO has referring expressions
+                        sentences = ref.get('sentences', [])
+                        image_id = ref.get('image_id', '')
+
+                        for sent in sentences:
+                            text = sent.get('sent', sent.get('raw', ''))
+                            if text and image_id:
+                                image_filename = f"COCO_train2014_{image_id:012d}.jpg"
+
+                                if image_dirs:
+                                    for img_dir in image_dirs:
+                                        candidate = img_dir / image_filename
+                                        if candidate.exists():
+                                            samples.append({
+                                                'image': str(candidate),
+                                                'caption': text,
+                                            })
+                                            break
+
+                # ===== OCR-VQA Format =====
+                elif any('ocr' in str(k).lower() or 'text' in str(k).lower() for k in list(data.keys())[:10]):
+                    logger.info(f"Detected OCR-VQA or text-based format")
+
+                    # OCR-VQA typically has image_id, question, answer
+                    items = data.get('data', data.get('annotations', []))
+                    if isinstance(items, dict):
+                        items = list(items.values())
+
+                    for item in items[:50000]:  # Limit for memory
+                        question = item.get('question', item.get('text', ''))
+                        answer = item.get('answer', item.get('answers', [''])[0] if isinstance(item.get('answers'), list) else '')
+                        image_id = item.get('image_id', item.get('image', ''))
+
+                        if question and image_id:
+                            text = f"Question: {question} Answer: {answer}" if answer else f"Question: {question}"
+
+                            # Try to find image
+                            if isinstance(image_id, str) and ('/' in image_id or '.' in image_id):
+                                image_path = image_id
+                            else:
+                                image_path = f"{image_id}.jpg"
+
+                            if not os.path.isabs(image_path):
+                                image_path = str(json_parent / image_path)
+
+                            samples.append({
+                                'image': image_path,
+                                'caption': text,
+                            })
+
+            added_count = len(samples) - before_count
+            if added_count > 0:
+                logger.info(f"Loaded {added_count} samples from {json_file.name}")
+            else:
+                logger.warning(f"No samples loaded from {json_file.name}")
 
         # Filter by split if needed
         if self.split == 'train':
@@ -214,7 +368,8 @@ class AlignmentDataset(BaseVLMDataset):
         else:
             samples = samples[int(len(samples) * 0.9):]
 
-        logger.info(f"Loaded {len(samples)} samples for {self.split} split from {self.data_dir}")
+        logger.info(f"Loaded {len(samples)} total samples for {self.split} split from {self.data_dir}")
+        logger.info(f"Dataset breakdown: COCO captions, VQA, GQA, RefCOCO, OCR-VQA, and other formats")
         return samples
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
