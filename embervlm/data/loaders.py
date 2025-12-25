@@ -119,13 +119,13 @@ class AlignmentDataset(BaseVLMDataset):
 
         logger.info(f"Found {len(json_files)} JSON files to process")
 
-        # Skip certain files that are not data annotations or are non-VL tasks
-        # Also skip GQA test/submission files (no ground truth answers, huge files)
+        # Skip ONLY true metadata and non-vision-language annotation files
+        # KEEP all VQA/GQA data including test/challenge/submission sets
         skip_patterns = [
-            'download_summary', 'metadata', 'info', 'license',
-            'instances', 'person_keypoints',
-            'test_all_questions', 'test_balanced', 'testdev',  # GQA test sets
-            'submission', 'challenge',  # GQA challenge/submission sets
+            'download_summary',  # Download metadata
+            'instances_',        # COCO object detection (not VL)
+            'person_keypoints_', # COCO pose estimation (not VL)
+            '__MACOSX',          # Mac OS metadata folder
         ]
 
         for json_file in json_files:
@@ -318,7 +318,12 @@ class AlignmentDataset(BaseVLMDataset):
                                 found_dirs = list(search_dir.glob(pattern))
                                 image_dirs.extend(found_dirs)
 
-                        for qid, item in list(data.items())[:100000]:  # Limit for memory
+                        # Process GQA questions (limit to 500K per file to avoid OOM)
+                        # This includes train/val/test/challenge - we use ALL data
+                        gqa_limit = min(500000, len(data))
+                        gqa_samples_added = 0
+
+                        for qid, item in list(data.items())[:gqa_limit]:
                             if not isinstance(item, dict):
                                 continue
 
@@ -338,7 +343,11 @@ class AlignmentDataset(BaseVLMDataset):
                                                 'image': str(candidate),
                                                 'caption': text,
                                             })
+                                            gqa_samples_added += 1
                                             break
+
+                        if gqa_samples_added > 0:
+                            logger.info(f"Loaded {gqa_samples_added} GQA samples from {json_file.name}")
 
                 # ===== RefCOCO Format =====
                 elif 'refs' in data or any('ref_id' in str(k) for k in list(data.keys())[:5]):
@@ -406,10 +415,14 @@ class AlignmentDataset(BaseVLMDataset):
                             })
 
             added_count = len(samples) - before_count
+            # Log how many samples were added from this file
+            after_count = len(samples)
+            added_count = after_count - before_count
+
             if added_count > 0:
-                logger.info(f"Loaded {added_count} samples from {json_file.name}")
+                logger.info(f"✓ Loaded {added_count:,} samples from {json_file.name}")
             else:
-                logger.warning(f"No samples loaded from {json_file.name}")
+                logger.warning(f"✗ No samples loaded from {json_file.name}")
 
         # Filter by split if needed
         if self.split == 'train':
@@ -417,8 +430,11 @@ class AlignmentDataset(BaseVLMDataset):
         else:
             samples = samples[int(len(samples) * 0.9):]
 
-        logger.info(f"Loaded {len(samples)} total samples for {self.split} split from {self.data_dir}")
-        logger.info(f"Dataset breakdown: COCO captions, VQA, GQA, RefCOCO, OCR-VQA, and other formats")
+        logger.info(f"="*80)
+        logger.info(f"FINAL DATASET: Loaded {len(samples):,} total samples for {self.split} split")
+        logger.info(f"Data sources: COCO (captions), VQA v2, OK-VQA, A-OKVQA, GQA (all splits),")
+        logger.info(f"              LLaVA-Instruct, RefCOCO/+/g, OCR-VQA, CC3M, LAION-COCO")
+        logger.info(f"="*80)
         return samples
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
