@@ -120,7 +120,13 @@ class AlignmentDataset(BaseVLMDataset):
         logger.info(f"Found {len(json_files)} JSON files to process")
 
         # Skip certain files that are not data annotations or are non-VL tasks
-        skip_patterns = ['download_summary', 'metadata', 'info', 'license', 'instances', 'person_keypoints']
+        # Also skip GQA test/submission files (no ground truth answers, huge files)
+        skip_patterns = [
+            'download_summary', 'metadata', 'info', 'license',
+            'instances', 'person_keypoints',
+            'test_all_questions', 'test_balanced', 'testdev',  # GQA test sets
+            'submission', 'challenge',  # GQA challenge/submission sets
+        ]
 
         for json_file in json_files:
             # Skip metadata files
@@ -147,8 +153,16 @@ class AlignmentDataset(BaseVLMDataset):
                     text = None
                     image_path = None
 
-                    # Extract text (caption, question+answer, instruction, etc.)
-                    if 'caption' in item:
+                    # Extract text (caption, question+answer, instruction, conversations, etc.)
+                    if 'conversations' in item:
+                        # LLaVA format: conversations = [{"from": "human", "value": "..."}, {"from": "gpt", "value": "..."}]
+                        convos = item['conversations']
+                        if len(convos) >= 2:
+                            human_text = convos[0].get('value', '').replace('<image>\n', '').replace('<image>', '').strip()
+                            gpt_text = convos[1].get('value', '').strip()
+                            if human_text and gpt_text:
+                                text = f"Question: {human_text} Answer: {gpt_text}"
+                    elif 'caption' in item:
                         text = item['caption']
                     elif 'text' in item:
                         text = item['text']
@@ -160,14 +174,30 @@ class AlignmentDataset(BaseVLMDataset):
                     # Extract image path
                     if 'image' in item:
                         image_path = item['image']
+                        # LLaVA often uses COCO image IDs like "coco/train2017/000000123456.jpg"
+                        if not os.path.isabs(image_path):
+                            # Try multiple potential base dirs
+                            potential_paths = [
+                                json_parent / image_path,
+                                self.data_dir / image_path,
+                                self.data_dir / 'coco' / image_path.split('/')[-1] if '/' in image_path else None,
+                            ]
+                            for p in potential_paths:
+                                if p and p.exists():
+                                    image_path = str(p)
+                                    break
+                            else:
+                                image_path = str(json_parent / image_path)  # Fallback
                     elif 'image_id' in item:
                         image_path = f"{item['image_id']}.jpg"
-                    elif 'file_name' in item:
-                        image_path = item['file_name']
-
-                    if text and image_path:
                         if not os.path.isabs(image_path):
                             image_path = str(json_parent / image_path)
+                    elif 'file_name' in item:
+                        image_path = item['file_name']
+                        if not os.path.isabs(image_path):
+                            image_path = str(json_parent / image_path)
+
+                    if text and image_path:
                         samples.append({
                             'image': image_path,
                             'caption': text,
@@ -238,27 +268,38 @@ class AlignmentDataset(BaseVLMDataset):
                         answer = item.get('answer', item.get('multiple_choice_answer', ''))
                         image_id = item.get('image_id', '')
 
-                        if question:
+                        if question and image_id:
                             # Construct text as Q&A pair or just question
                             if answer:
                                 text = f"Question: {question} Answer: {answer}"
                             else:
                                 text = f"Question: {question}"
 
-                            # Find image file
-                            image_filename = f"COCO_train2014_{image_id:012d}.jpg" if image_id else None
-                            if not image_filename and 'image_name' in item:
-                                image_filename = item['image_name']
+                            # Try multiple COCO image naming conventions
+                            possible_filenames = [
+                                f"COCO_train2014_{image_id:012d}.jpg",
+                                f"COCO_val2014_{image_id:012d}.jpg",
+                                f"COCO_train2017_{image_id:012d}.jpg",
+                                f"COCO_val2017_{image_id:012d}.jpg",
+                                f"{image_id:012d}.jpg",  # Sometimes just the ID
+                            ]
+                            if 'image_name' in item:
+                                possible_filenames.insert(0, item['image_name'])
 
-                            if image_filename and image_dirs:
+                            found_image = False
+                            if image_dirs:
                                 for img_dir in image_dirs:
-                                    candidate = img_dir / image_filename
-                                    if candidate.exists():
-                                        samples.append({
-                                            'image': str(candidate),
-                                            'caption': text,
-                                        })
+                                    if found_image:
                                         break
+                                    for image_filename in possible_filenames:
+                                        candidate = img_dir / image_filename
+                                        if candidate.exists():
+                                            samples.append({
+                                                'image': str(candidate),
+                                                'caption': text,
+                                            })
+                                            found_image = True
+                                            break
 
                 # ===== GQA Format =====
                 elif isinstance(data, dict) and len(data) > 0:
@@ -285,19 +326,19 @@ class AlignmentDataset(BaseVLMDataset):
                             answer = item.get('answer', '')
                             image_id = item.get('imageId', '')
 
-                        if question and image_id:
-                            text = f"Question: {question} Answer: {answer}" if answer else f"Question: {question}"
-                            image_filename = f"{image_id}.jpg"
+                            if question and image_id:
+                                text = f"Question: {question} Answer: {answer}" if answer else f"Question: {question}"
+                                image_filename = f"{image_id}.jpg"
 
-                            if image_dirs:
-                                for img_dir in image_dirs:
-                                    candidate = img_dir / image_filename
-                                    if candidate.exists():
-                                        samples.append({
-                                            'image': str(candidate),
-                                            'caption': text,
-                                        })
-                                        break
+                                if image_dirs:
+                                    for img_dir in image_dirs:
+                                        candidate = img_dir / image_filename
+                                        if candidate.exists():
+                                            samples.append({
+                                                'image': str(candidate),
+                                                'caption': text,
+                                            })
+                                            break
 
                 # ===== RefCOCO Format =====
                 elif 'refs' in data or any('ref_id' in str(k) for k in list(data.keys())[:5]):
