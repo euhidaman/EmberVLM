@@ -282,24 +282,29 @@ class TrainingVisualizer:
         class_names: List[str],
         stage_name: str,
         save_path: Optional[str] = None,
+        confusion_matrix: Optional[np.ndarray] = None,
     ) -> Tuple[plt.Figure, Image.Image]:
         """
         Plot confusion matrix for classification tasks.
 
         Args:
-            predictions: Predicted class indices
-            labels: True class indices
+            predictions: Predicted class indices (or None if confusion_matrix provided)
+            labels: True class indices (or None if confusion_matrix provided)
             class_names: List of class names
             stage_name: Name of training stage
             save_path: Optional path to save figure
+            confusion_matrix: Pre-computed confusion matrix (optional)
 
         Returns:
             Tuple of (matplotlib figure, PIL Image)
         """
-        from sklearn.metrics import confusion_matrix
+        from sklearn.metrics import confusion_matrix as sklearn_cm
 
-        # Compute confusion matrix
-        cm = confusion_matrix(labels, predictions)
+        # Compute confusion matrix if not provided
+        if confusion_matrix is not None:
+            cm = confusion_matrix
+        else:
+            cm = sklearn_cm(labels, predictions)
         cm_normalized = cm.astype('float') / (cm.sum(axis=1)[:, np.newaxis] + 1e-8)
 
         fig, axes = plt.subplots(1, 2, figsize=(16, 7))

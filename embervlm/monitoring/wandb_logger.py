@@ -587,16 +587,18 @@ class EnhancedWandbLogger(WandbLogger):
         class_names: List[str],
         step: int,
         stage_name: str = "training",
+        confusion_matrix: Any = None,
     ):
         """
         Log confusion matrix for classification tasks.
 
         Args:
-            predictions: Predicted class indices
-            labels: True class indices
+            predictions: Predicted class indices (or None if confusion_matrix provided)
+            labels: True class indices (or None if confusion_matrix provided)
             class_names: List of class names
             step: Training step
             stage_name: Stage name
+            confusion_matrix: Pre-computed confusion matrix (optional)
         """
         if not self.enabled or not self.visualizer:
             return
@@ -604,20 +606,29 @@ class EnhancedWandbLogger(WandbLogger):
         try:
             import numpy as np
 
-            # Convert to numpy
-            if hasattr(predictions, 'cpu'):
-                pred_np = predictions.cpu().numpy()
+            if confusion_matrix is not None:
+                # Use pre-computed confusion matrix
+                cm = np.array(confusion_matrix)
             else:
-                pred_np = np.array(predictions)
+                # Convert to numpy and compute confusion matrix
+                if hasattr(predictions, 'cpu'):
+                    pred_np = predictions.cpu().numpy()
+                else:
+                    pred_np = np.array(predictions)
 
-            if hasattr(labels, 'cpu'):
-                label_np = labels.cpu().numpy()
-            else:
-                label_np = np.array(labels)
+                if hasattr(labels, 'cpu'):
+                    label_np = labels.cpu().numpy()
+                else:
+                    label_np = np.array(labels)
+
+                # Compute confusion matrix
+                from sklearn.metrics import confusion_matrix as sklearn_cm
+                cm = sklearn_cm(label_np, pred_np)
 
             _, cm_img = self.visualizer.plot_confusion_matrix(
-                pred_np, label_np, class_names, stage_name,
-                save_path=str(self.visualizer.output_dir / f"confusion_matrix_step{step}.png")
+                None, None, class_names, stage_name,
+                save_path=str(self.visualizer.output_dir / f"confusion_matrix_step{step}.png"),
+                confusion_matrix=cm,
             )
             self.log_image(f"{stage_name}/confusion_matrix", cm_img, step=step)
         except Exception as e:
