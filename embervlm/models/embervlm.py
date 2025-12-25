@@ -406,11 +406,16 @@ class EmberVLM(nn.Module):
                     pos = image_positions[i].item()
                     # Copy labels before image position
                     if pos > 0:
-                        adjusted_labels[i, :pos] = labels[i, :pos]
+                        copy_len = min(pos, labels.size(1))
+                        adjusted_labels[i, :copy_len] = labels[i, :copy_len]
                     # Visual tokens get -100 (already set)
                     # Copy labels after image position
-                    remaining = labels.size(1) - pos
-                    adjusted_labels[i, pos + num_visual:pos + num_visual + remaining] = labels[i, pos:]
+                    start_pos = pos + num_visual
+                    if start_pos < adjusted_labels.size(1) and pos < labels.size(1):
+                        remaining = labels.size(1) - pos
+                        end_pos = min(start_pos + remaining, adjusted_labels.size(1))
+                        copy_len = end_pos - start_pos
+                        adjusted_labels[i, start_pos:end_pos] = labels[i, pos:pos + copy_len]
             else:
                 adjusted_labels = labels
 
