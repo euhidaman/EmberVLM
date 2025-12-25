@@ -194,79 +194,75 @@ class AlignmentDataset(BaseVLMDataset):
                     split="train"
                 )
 
-                logger.info(f"Found {len(dataset):,} samples in CC3M dataset")
+            logger.info(f"Found {len(dataset):,} samples in CC3M dataset")
 
-                # Limit to avoid OOM - sample 500k from the ~3M dataset
-                samples_limit = 500000
+            # Limit to avoid OOM - sample 500k from the ~3M dataset
+            samples_limit = 500000
 
-                # Sample indices uniformly across the dataset
-                if len(dataset) > samples_limit:
-                    import numpy as np
-                    indices = np.linspace(0, len(dataset) - 1, samples_limit, dtype=int)
-                    dataset = dataset.select(indices)
-                    logger.info(f"Sampled {samples_limit:,} from CC3M dataset")
+            # Sample indices uniformly across the dataset
+            if len(dataset) > samples_limit:
+                import numpy as np
+                indices = np.linspace(0, len(dataset) - 1, samples_limit, dtype=int)
+                dataset = dataset.select(indices)
+                logger.info(f"Sampled {samples_limit:,} from CC3M dataset")
 
-                # Process samples with progress tracking
-                successful = 0
-                failed = 0
+            # Process samples with progress tracking
+            successful = 0
+            failed = 0
 
-                for i, item in enumerate(dataset):
-                    try:
-                        # Extract image - CC3M stores as PIL Image in 'jpg' field
-                        image = item.get('jpg') or item.get('image')
+            for i, item in enumerate(dataset):
+                try:
+                    # Extract image - CC3M stores as PIL Image in 'jpg' field
+                    image = item.get('jpg') or item.get('image')
 
-                        # Extract caption
-                        caption = item.get('txt') or item.get('caption') or item.get('text', '')
+                    # Extract caption
+                    caption = item.get('txt') or item.get('caption') or item.get('text', '')
 
-                        if image is None or not caption:
-                            failed += 1
-                            continue
-
-                        # Ensure image is PIL Image and in RGB mode
-                        if not isinstance(image, Image.Image):
-                            # Try to decode if it's bytes
-                            if isinstance(image, bytes):
-                                import io
-                                image = Image.open(io.BytesIO(image))
-                            else:
-                                failed += 1
-                                continue
-
-                        # Convert to RGB and verify
-                        if image.mode != 'RGB':
-                            image = image.convert('RGB')
-                        image.load()  # Force load to verify image is valid
-
-                        caption = str(caption).strip()
-                        if not caption:
-                            failed += 1
-                            continue
-
-                        samples.append({
-                            'image': image,
-                            'caption': caption,
-                        })
-                        successful += 1
-
-                        # Log progress every 50k samples
-                        if successful > 0 and successful % 50000 == 0:
-                            logger.info(f"  Loaded {successful:,} CC3M samples so far...")
-
-                    except Exception as e:
+                    if image is None or not caption:
                         failed += 1
-                        if failed <= 10:  # Only log first 10 failures
-                            logger.debug(f"Failed to process CC3M sample {i}: {e}")
                         continue
 
-                if samples:
-                    logger.info(f"✓ Loaded {len(samples):,} samples from CC3M (successful: {successful:,}, failed: {failed:,})")
-                else:
-                    logger.warning(f"✗ No samples loaded from CC3M dataset (failed: {failed:,})")
+                    # Ensure image is PIL Image and in RGB mode
+                    if not isinstance(image, Image.Image):
+                        # Try to decode if it's bytes
+                        if isinstance(image, bytes):
+                            import io
+                            image = Image.open(io.BytesIO(image))
+                        else:
+                            failed += 1
+                            continue
 
-            except Exception as e:
-                logger.warning(f"Failed to load CC3M with load_dataset: {e}")
-                logger.info("CC3M dataset should be downloaded to data/base_vlm/cc3m/")
-                return samples
+                    # Convert to RGB and verify
+                    if image.mode != 'RGB':
+                        image = image.convert('RGB')
+                    image.load()  # Force load to verify image is valid
+
+                    caption = str(caption).strip()
+                    if not caption:
+                        failed += 1
+                        continue
+
+                    samples.append({
+                        'image': image,
+                        'caption': caption,
+                    })
+                    successful += 1
+
+                    # Log progress every 50k samples
+                    if successful > 0 and successful % 50000 == 0:
+                        logger.info(f"  Loaded {successful:,} CC3M samples so far...")
+
+                except Exception as e:
+                    failed += 1
+                    if failed <= 10:  # Only log first 10 failures
+                        logger.debug(f"Failed to process CC3M sample {i}: {e}")
+                    continue
+
+            if samples:
+                logger.info(f"✓ Loaded {len(samples):,} samples from CC3M (successful: {successful:,}, failed: {failed:,})")
+            else:
+                logger.warning(f"✗ No samples loaded from CC3M dataset (failed: {failed:,})")
+
 
         except Exception as e:
             logger.warning(f"Failed to load CC3M dataset: {e}")
