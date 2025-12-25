@@ -149,16 +149,49 @@ class AlignmentDataset(BaseVLMDataset):
                 logger.warning("HuggingFace datasets library not available - skipping CC3M. Install with: pip install datasets")
                 return samples
 
-            logger.info("Loading CC3M dataset from HuggingFace format...")
+            # Check if dataset is already cached locally
+            # The dataset structure is: cc3m/dataset/pixparse___cc3m-wds/default/0.0.0/<hash>/
+            cached_dataset_path = cc3m_dir / 'dataset' / 'pixparse___cc3m-wds' / 'default' / '0.0.0'
 
-            # Load using HuggingFace datasets with the local cache
-            # The dataset is already downloaded to cc3m_dir
-            try:
+            # Look for the hash directory (e.g., 46f3d69f840e59d77d52e8decfe5baec97e94c7f)
+            if cached_dataset_path.exists():
+                hash_dirs = [d for d in cached_dataset_path.iterdir() if d.is_dir() and len(d.name) == 40]
+                if hash_dirs:
+                    # Found cached dataset - load from local path
+                    local_dataset_path = hash_dirs[0]
+                    logger.info(f"Loading CC3M dataset from cached path: {local_dataset_path}")
+
+                    try:
+                        # Load from the local Arrow files directly
+                        dataset = load_dataset(
+                            "arrow",
+                            data_files={
+                                "train": str(local_dataset_path / "cc3m-wds-train-*.arrow")
+                            },
+                            split="train"
+                        )
+                        logger.info(f"✓ Successfully loaded {len(dataset):,} samples from cached CC3M dataset")
+                    except Exception as e:
+                        logger.warning(f"Failed to load from cached path, will try downloading: {e}")
+                        # Fallback to downloading
+                        dataset = load_dataset(
+                            "pixparse/cc3m-wds",
+                            cache_dir=str(cc3m_dir / 'dataset'),
+                            split="train"
+                        )
+                else:
+                    logger.info("Loading CC3M dataset from HuggingFace (downloading)...")
+                    dataset = load_dataset(
+                        "pixparse/cc3m-wds",
+                        cache_dir=str(cc3m_dir / 'dataset'),
+                        split="train"
+                    )
+            else:
+                logger.info("Loading CC3M dataset from HuggingFace (downloading)...")
                 dataset = load_dataset(
                     "pixparse/cc3m-wds",
-                    cache_dir=str(cc3m_dir),
-                    split="train",
-                    trust_remote_code=True
+                    cache_dir=str(cc3m_dir / 'dataset'),
+                    split="train"
                 )
 
                 logger.info(f"Found {len(dataset):,} samples in CC3M dataset")
