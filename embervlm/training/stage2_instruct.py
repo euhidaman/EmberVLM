@@ -36,7 +36,7 @@ from embervlm.training.train_utils import (
     print_trainable_parameters,
 )
 from embervlm.data.loaders import get_instruction_dataloader
-from embervlm.monitoring.wandb_logger import WandbLogger
+from embervlm.monitoring.wandb_logger import EnhancedWandbLogger
 from embervlm.monitoring.carbon_tracker import CarbonTracker
 
 logger = logging.getLogger(__name__)
@@ -204,14 +204,14 @@ class Stage2Trainer:
         self.carbon_tracker = None
 
         if is_main_process():
-            logger.info("Initializing W&B logger (main process)...")
+            logger.info("Initializing Enhanced W&B logger with visualizations (main process)...")
             try:
-                self.wandb_logger = WandbLogger(
+                self.wandb_logger = EnhancedWandbLogger(
                     project="embervlm",
                     name="stage2_instruct",
                     config=config.to_dict(),
                 )
-                logger.info("W&B logger initialized")
+                logger.info("Enhanced W&B logger initialized with visualizations")
             except Exception as e:
                 logger.warning(f"Failed to initialize W&B logger: {e}")
                 self.wandb_logger = None
@@ -364,25 +364,30 @@ class Stage2Trainer:
 
                     if is_main_process():
                         if self.wandb_logger is not None:
-                            self.wandb_logger.log_with_visualization(
-                                avg_metrics,
-                                step=self.global_step,
-                                stage_name="stage2",
-                            )
+                            # Use enhanced logging with visualizations
+                            if hasattr(self.wandb_logger, 'log_with_visualization'):
+                                self.wandb_logger.log_with_visualization(
+                                    avg_metrics,
+                                    step=self.global_step,
+                                    stage_name="stage2",
+                                )
+                            else:
+                                self.wandb_logger.log(avg_metrics, step=self.global_step)
                         progress_bar.set_postfix({
                             'loss': f"{avg_metrics['loss']:.4f}",
                         })
 
                         # Log gradient distribution periodically
                         if self.global_step % 500 == 0 and self.wandb_logger is not None:
-                            gradients = {}
-                            for name, param in self.model.named_parameters():
-                                if param.grad is not None:
-                                    gradients[name] = param.grad
-                            if gradients:
-                                self.wandb_logger.log_gradient_distribution(
-                                    gradients, self.global_step, "stage2"
-                                )
+                            if hasattr(self.wandb_logger, 'log_gradient_distribution'):
+                                gradients = {}
+                                for name, param in self.model.named_parameters():
+                                    if param.grad is not None and param.requires_grad:
+                                        gradients[name.split('.')[-1]] = param.grad
+                                if gradients:
+                                    self.wandb_logger.log_gradient_distribution(
+                                        gradients, self.global_step, "stage2"
+                                    )
 
                     self.metric_tracker.reset()
 

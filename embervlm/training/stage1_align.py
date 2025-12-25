@@ -38,7 +38,7 @@ from embervlm.training.train_utils import (
     print_trainable_parameters,
 )
 from embervlm.data.loaders import get_alignment_dataloader
-from embervlm.monitoring.wandb_logger import WandbLogger
+from embervlm.monitoring.wandb_logger import EnhancedWandbLogger
 from embervlm.monitoring.carbon_tracker import CarbonTracker
 
 logger = logging.getLogger(__name__)
@@ -168,14 +168,14 @@ class Stage1Trainer:
         self.carbon_tracker = None
 
         if is_main_process():
-            logger.info("Initializing W&B logger (main process)...")
+            logger.info("Initializing Enhanced W&B logger with visualizations (main process)...")
             try:
-                self.wandb_logger = WandbLogger(
+                self.wandb_logger = EnhancedWandbLogger(
                     project="embervlm",
                     name="stage1_alignment",
                     config=config.to_dict(),
                 )
-                logger.info("W&B logger initialized")
+                logger.info("Enhanced W&B logger initialized with visualizations")
             except Exception as e:
                 logger.warning(f"Failed to initialize W&B logger: {e}")
                 self.wandb_logger = None

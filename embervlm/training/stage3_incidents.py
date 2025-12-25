@@ -36,7 +36,7 @@ from embervlm.training.train_utils import (
     print_trainable_parameters,
 )
 from embervlm.data.robot_loader import get_robot_selection_dataloader
-from embervlm.monitoring.wandb_logger import WandbLogger
+from embervlm.monitoring.wandb_logger import EnhancedWandbLogger
 from embervlm.monitoring.carbon_tracker import CarbonTracker
 
 logger = logging.getLogger(__name__)
@@ -113,16 +113,16 @@ class Stage3Trainer:
         self.carbon_tracker = None
 
         if is_main_process():
-            logger.info("Initializing W&B logger (main process)...")
+            logger.info("Initializing Enhanced W&B logger with visualizations (main process)...")
             try:
-                self.wandb_logger = WandbLogger(
+                self.wandb_logger = EnhancedWandbLogger(
                     project="embervlm",
                     name="stage3_robot_selection",
                     config=config.to_dict(),
                 )
-                logger.info("W&B logger initialized")
+                logger.info("Enhanced W&B logger initialized with visualizations")
             except Exception as e:
-                logger.warning(f"Failed to initialize W&B logger: {e}")
+                logger.warning(f"Failed to initialize Enhanced W&B logger: {e}")
                 self.wandb_logger = None
 
             try:
@@ -230,7 +230,26 @@ class Stage3Trainer:
 
                     if is_main_process():
                         if self.wandb_logger is not None:
-                            self.wandb_logger.log(avg_metrics, step=self.global_step)
+                            # Use enhanced logging with visualizations
+                            if hasattr(self.wandb_logger, 'log_with_visualization'):
+                                self.wandb_logger.log_with_visualization(
+                                    avg_metrics,
+                                    step=self.global_step,
+                                    stage_name="stage3",
+                                )
+                            else:
+                                self.wandb_logger.log(avg_metrics, step=self.global_step)
+
+                            # Log gradient distribution every 500 steps
+                            if self.global_step % 500 == 0 and hasattr(self.wandb_logger, 'log_gradient_distribution'):
+                                gradients = {}
+                                for name, param in self.model.named_parameters():
+                                    if param.grad is not None and param.requires_grad:
+                                        gradients[name.split('.')[-1]] = param.grad
+                                if gradients:
+                                    self.wandb_logger.log_gradient_distribution(
+                                        gradients, self.global_step, "stage3"
+                                    )
 
                         display_metrics = {k: f"{v:.4f}" for k, v in avg_metrics.items()
                                           if k != 'lr'}
@@ -258,6 +277,10 @@ class Stage3Trainer:
         correct = 0
         total = 0
 
+        # For confusion matrix
+        all_predictions = []
+        all_targets = []
+
         for batch in tqdm(
             val_data,
             desc="Evaluating",
@@ -284,6 +307,10 @@ class Stage3Trainer:
                     correct += (robot_preds == robot_targets).sum().item()
                     total += robot_targets.size(0)
 
+                    # Collect for confusion matrix
+                    all_predictions.extend(robot_preds.cpu().numpy().tolist())
+                    all_targets.extend(robot_targets.cpu().numpy().tolist())
+
                     # Per-robot accuracy
                     for i in range(outputs['robot_logits'].size(-1)):
                         mask = robot_targets == i
@@ -302,6 +329,22 @@ class Stage3Trainer:
         if is_main_process():
             if self.wandb_logger is not None:
                 self.wandb_logger.log(avg_metrics, step=self.global_step)
+
+                # Log confusion matrix if enhanced logger
+                if hasattr(self.wandb_logger, 'log_confusion_matrix') and len(all_predictions) > 0:
+                    model_ref = self.model.module if hasattr(self.model, 'module') else self.model
+                    num_robots = model_ref.config.num_robots
+                    class_names = [f'Robot_{i}' for i in range(num_robots)]
+
+                    import numpy as np
+                    self.wandb_logger.log_confusion_matrix(
+                        predictions=np.array(all_predictions),
+                        labels=np.array(all_targets),
+                        class_names=class_names,
+                        step=self.global_step,
+                        stage_name="stage3",
+                    )
+
             logger.info(f"Evaluation: {avg_metrics}")
 
         self.model.train()
