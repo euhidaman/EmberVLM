@@ -320,7 +320,6 @@ torchrun --nproc_per_node=2 scripts/train_all.py \
     --gradient_accumulation 4 \
     --save_steps 500 \
     --log_steps 50 \
-    --eval_steps 500 \
     --stage1_data data/base_vlm \
     --stage2_data data/base_vlm/llava \
     --robot_data robot-selection-dataset \
@@ -328,6 +327,8 @@ torchrun --nproc_per_node=2 scripts/train_all.py \
     --stage2_epochs 3 \
     --stage3_robot_epochs 30
 ```
+
+**Note**: `--eval_steps` defaults to 500 (same as `--save_steps`), so it's optional.
 
 **Training Time (2× A100 80GB):**
 - Stage 1: **~48-72 hours** (~5M samples across 11 datasets, batches depend on data loader sampling)

@@ -16,6 +16,13 @@ import torch.distributed as dist
 from PIL import Image
 import torchvision.transforms as transforms
 
+try:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    ARROW_AVAILABLE = True
+except ImportError:
+    ARROW_AVAILABLE = False
+
 
 class BaseVLMDataset(Dataset):
     """Base dataset class for vision-language data."""
@@ -103,12 +110,120 @@ class BaseVLMDataset(Dataset):
 class AlignmentDataset(BaseVLMDataset):
     """Dataset for Stage 1 visual-language alignment - supports multiple dataset formats."""
 
+    def _load_cc3m_arrow(self, logger) -> List[Dict[str, Any]]:
+        """Load CC3M data from Arrow files."""
+        if not ARROW_AVAILABLE:
+            logger.warning("pyarrow not available - skipping CC3M Arrow files")
+            return []
+
+        samples = []
+        cc3m_dir = self.data_dir / 'cc3m' / 'dataset' / 'pixparse___cc3m-wds'
+
+        if not cc3m_dir.exists():
+            logger.debug("CC3M Arrow directory not found")
+            return samples
+
+        # Find all arrow files
+        arrow_files = list(cc3m_dir.rglob('*.arrow'))
+
+        if not arrow_files:
+            logger.debug("No CC3M Arrow files found")
+            return samples
+
+        logger.info(f"Loading CC3M from {len(arrow_files)} Arrow files...")
+
+        # Limit to 500K samples for CC3M to avoid OOM
+        samples_limit = 500000
+        samples_per_file = max(1, samples_limit // len(arrow_files))
+
+        # CC3M images directory (if images were downloaded)
+        cc3m_images_dir = self.data_dir / 'cc3m' / 'images'
+
+        for arrow_file in arrow_files:
+            try:
+                # Open Arrow file
+                with pa.memory_map(str(arrow_file), 'r') as source:
+                    table = pa.ipc.open_file(source).read_all()
+
+                # Convert to dict for faster access
+                data_dict = table.to_pydict()
+
+                # Sample from this file
+                num_rows = table.num_rows
+                num_samples = min(num_rows, samples_per_file)
+
+                # Get indices to sample
+                if num_samples < num_rows:
+                    import numpy as np
+                    indices = np.random.choice(num_rows, num_samples, replace=False)
+                else:
+                    indices = range(num_rows)
+
+                # Extract caption and image
+                for idx in indices:
+                    caption = None
+                    image_path = None
+
+                    # Try different column names for caption
+                    if 'caption' in data_dict:
+                        caption = str(data_dict['caption'][idx])
+                    elif 'text' in data_dict:
+                        caption = str(data_dict['text'][idx])
+
+                    # Try different column names for image
+                    if 'jpg' in data_dict:  # CC3M WDS format stores image in 'jpg' column
+                        # Image stored as bytes - save key and we'll load from bytes in __getitem__
+                        image_bytes = data_dict['jpg'][idx]
+                        if image_bytes:
+                            # For now, store placeholder - actual loading will happen in __getitem__
+                            # We'll need to handle bytes differently
+                            image_path = f"cc3m_bytes_{len(samples)}"
+                    elif 'image' in data_dict:
+                        image_data = data_dict['image'][idx]
+                        if isinstance(image_data, (str, bytes)):
+                            image_path = str(image_data)
+                    elif 'url' in data_dict:
+                        # Image URL - check if local file exists
+                        image_url = str(data_dict['url'][idx])
+                        # Extract filename from URL
+                        filename = image_url.split('/')[-1]
+                        local_path = cc3m_images_dir / filename
+                        if local_path.exists():
+                            image_path = str(local_path)
+
+                    if caption and image_path:
+                        samples.append({
+                            'image': image_path,
+                            'caption': caption,
+                        })
+
+                    if len(samples) >= samples_limit:
+                        break
+
+                if len(samples) >= samples_limit:
+                    break
+
+            except Exception as e:
+                logger.warning(f"Failed to load Arrow file {arrow_file.name}: {e}")
+                continue
+
+        if samples:
+            logger.info(f"✓ Loaded {len(samples):,} samples from CC3M Arrow files")
+        else:
+            logger.warning("✗ No samples loaded from CC3M Arrow files")
+
+        return samples
+
     def _load_data(self) -> List[Dict[str, Any]]:
         """Load image-text pairs from multiple dataset formats."""
         import logging
         logger = logging.getLogger(__name__)
 
         samples = []
+
+        # First, load CC3M from Arrow files
+        cc3m_samples = self._load_cc3m_arrow(logger)
+        samples.extend(cc3m_samples)
 
         # Recursively search for JSON files in subdirectories
         json_files = list(self.data_dir.rglob('*.json'))
