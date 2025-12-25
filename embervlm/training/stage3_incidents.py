@@ -36,6 +36,7 @@ from embervlm.training.train_utils import (
     print_trainable_parameters,
 )
 from embervlm.data.robot_loader import get_robot_selection_dataloader
+from embervlm.training.robot_metrics import RobotSelectionMetrics, ReasoningQualityMetrics
 from embervlm.monitoring.wandb_logger import EnhancedWandbLogger
 from embervlm.monitoring.carbon_tracker import CarbonTracker
 
@@ -140,6 +141,11 @@ class Stage3Trainer:
             logger.info(f"[Rank {self.rank}] Passed post-logging barrier")
 
         self.metric_tracker = MetricTracker()
+        self.robot_metrics = RobotSelectionMetrics(
+            num_robots=5,
+            robot_names=["Drone", "Underwater Robot", "Humanoid", "Robot with Wheels", "Robot with Legs"]
+        )
+        self.reasoning_metrics = ReasoningQualityMetrics()
         self.global_step = 0
 
         if is_main_process():
@@ -269,18 +275,14 @@ class Stage3Trainer:
 
     @torch.no_grad()
     def evaluate(self):
-        """Evaluate robot selection performance."""
+        """Evaluate robot selection performance with comprehensive metrics."""
         self.model.eval()
-        eval_metrics = MetricTracker()
+
+        # Reset metrics
+        self.robot_metrics.reset()
+        self.reasoning_metrics.reset()
 
         val_data = self.val_dataloader if self.val_dataloader else self.robot_dataloader
-
-        correct = 0
-        total = 0
-
-        # For confusion matrix
-        all_predictions = []
-        all_targets = []
 
         for batch in tqdm(
             val_data,
@@ -292,8 +294,12 @@ class Stage3Trainer:
             attention_mask = batch['attention_mask'].to(self.device)
 
             robot_targets = batch.get('robot_target')
+            multi_robot_targets = batch.get('multi_robot_target')
+
             if robot_targets is not None:
                 robot_targets = robot_targets.to(self.device)
+            if multi_robot_targets is not None:
+                multi_robot_targets = multi_robot_targets.to(self.device)
 
             with get_autocast_context(self.config):
                 outputs = self.model(
@@ -305,44 +311,58 @@ class Stage3Trainer:
 
                 if 'robot_logits' in outputs and robot_targets is not None:
                     robot_preds = outputs['robot_logits'].argmax(dim=-1)
-                    correct += (robot_preds == robot_targets).sum().item()
-                    total += robot_targets.size(0)
 
-                    # Collect for confusion matrix
-                    all_predictions.extend(robot_preds.cpu().numpy().tolist())
-                    all_targets.extend(robot_targets.cpu().numpy().tolist())
+                    # Get confidence scores (softmax probabilities)
+                    confidences = torch.softmax(outputs['robot_logits'], dim=-1)
+                    pred_confidences = confidences.gather(1, robot_preds.unsqueeze(1)).squeeze(1)
 
-                    # Per-robot accuracy
-                    for i in range(outputs['robot_logits'].size(-1)):
-                        mask = robot_targets == i
-                        if mask.sum() > 0:
-                            class_correct = ((robot_preds == robot_targets) & mask).sum()
-                            eval_metrics.update({
-                                f'robot_{i}_acc': (class_correct / mask.sum()).item()
-                            })
+                    # Multi-robot predictions (if available)
+                    multi_robot_preds = None
+                    if 'multi_robot_logits' in outputs and multi_robot_targets is not None:
+                        multi_robot_preds = torch.sigmoid(outputs['multi_robot_logits'])
 
-        if total > 0:
-            overall_acc = correct / total
-            eval_metrics.update({'val_robot_accuracy': overall_acc})
+                    # Update comprehensive metrics
+                    self.robot_metrics.update(
+                        predictions=robot_preds,
+                        targets=robot_targets,
+                        confidences=pred_confidences,
+                        multi_robot_preds=multi_robot_preds,
+                        multi_robot_targets=multi_robot_targets,
+                    )
 
-        avg_metrics = eval_metrics.get_average()
+        # Compute all metrics
+        metrics = self.robot_metrics.compute()
 
         if is_main_process():
+            logger.info(f"Evaluation: {metrics}")
+
             if self.wandb_logger is not None:
-                self.wandb_logger.log(avg_metrics, step=self.global_step)
+                self.wandb_logger.log(metrics, step=self.global_step)
 
-                # Log confusion matrix if enhanced logger
-                if hasattr(self.wandb_logger, 'log_confusion_matrix') and len(all_predictions) > 0:
-                    model_ref = self.model.module if hasattr(self.model, 'module') else self.model
-                    num_robots = model_ref.config.num_robots
-                    class_names = [f'Robot_{i}' for i in range(num_robots)]
+                # Log confusion matrix visualization
+                if hasattr(self.wandb_logger, 'log_confusion_matrix'):
+                    confusion_matrix = self.robot_metrics.get_confusion_matrix()
+                    robot_names = ["Drone", "Underwater", "Humanoid", "Wheeled", "Legged"]
 
-                    import numpy as np
                     self.wandb_logger.log_confusion_matrix(
-                        predictions=np.array(all_predictions),
-                        labels=np.array(all_targets),
-                        class_names=class_names,
+                        predictions=None,  # Already aggregated in confusion_matrix
+                        labels=None,
+                        class_names=robot_names,
                         step=self.global_step,
+                        stage_name="stage3",
+                        confusion_matrix=confusion_matrix,
+                    )
+
+                # Log per-class metrics as bar chart
+                per_class_acc = self.robot_metrics.get_per_class_accuracy()
+                if hasattr(self.wandb_logger, 'log_bar_chart'):
+                    self.wandb_logger.log_bar_chart(
+                        data=per_class_acc,
+                        title="Per-Robot Accuracy",
+                        x_label="Robot Type",
+                        y_label="Accuracy",
+                        step=self.global_step,
+                    )
                         stage_name="stage3",
                     )
 

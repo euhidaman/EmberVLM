@@ -1,101 +1,90 @@
 """
-Robot Selection Dataset Loader for EmberVLM
+Enhanced Robot Selection Dataset Loader for EmberVLM
 
-Loads and processes robot fleet selection data with
-reasoning chains for training robot selection capabilities.
+Comprehensive implementation with:
+- Single-robot and multi-robot dataset loading
+- Chain-of-thought reasoning generation
+- Subtask decomposition for multi-robot scenarios
+- Data augmentation (10K+ samples)
+- Scene graph to image generation
+- Proper train/val/test splits
 """
 
 import os
 import json
 import random
+import logging
+import hashlib
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Callable
+from typing import Optional, Dict, Any, List, Tuple
+from collections import defaultdict
 
 import torch
+import numpy as np
 from torch.utils.data import Dataset, DataLoader, DistributedSampler
 import torch.distributed as dist
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 import torchvision.transforms as transforms
 
+logger = logging.getLogger(__name__)
 
-# Robot fleet definition
-ROBOT_FLEET = [
-    {
-        "name": "Drone",
-        "capabilities": {
-            "aerial_survey": True,
-            "payload_kg": 2,
-            "speed_kmh": 60,
-            "battery_hours": 0.5,
-            "terrain": ["air"],
-            "strengths": "Rapid aerial reconnaissance, hard-to-reach areas",
-            "weaknesses": "Limited payload, short battery life, affected by weather"
-        }
-    },
-    {
-        "name": "Humanoid",
-        "capabilities": {
-            "manipulation": True,
-            "payload_kg": 20,
-            "speed_kmh": 5,
-            "battery_hours": 4,
-            "terrain": ["indoor", "outdoor_flat"],
-            "strengths": "Human-like manipulation, can use human tools",
-            "weaknesses": "Slow, unstable on rough terrain"
-        }
-    },
-    {
-        "name": "Wheeled",
-        "capabilities": {
-            "heavy_transport": True,
-            "payload_kg": 100,
-            "speed_kmh": 30,
-            "battery_hours": 8,
-            "terrain": ["road", "indoor"],
-            "strengths": "High payload, long range, stable platform",
-            "weaknesses": "Limited to flat surfaces, cannot navigate stairs"
-        }
-    },
-    {
-        "name": "Legged",
-        "capabilities": {
-            "rough_terrain": True,
-            "payload_kg": 30,
-            "speed_kmh": 15,
-            "battery_hours": 2,
-            "terrain": ["rocky", "stairs", "slopes"],
-            "strengths": "Versatile terrain navigation, can climb stairs",
-            "weaknesses": "Moderate payload, complex control"
-        }
-    },
-    {
-        "name": "Underwater",
-        "capabilities": {
-            "aquatic_ops": True,
-            "payload_kg": 10,
-            "speed_kmh": 10,
-            "battery_hours": 3,
-            "terrain": ["water"],
-            "strengths": "Underwater operations, diving capability",
-            "weaknesses": "Limited to aquatic environments"
-        }
-    }
-]
+# Robot fleet definitions matching the dataset format
+ROBOT_MAPPING = {
+    "Drone": 0,
+    "Underwater Robot": 1,
+    "Humanoid": 2,
+    "Robot with Wheels": 3,
+    "Robot with Legs": 4,
+}
 
-ROBOT_NAMES = [r["name"] for r in ROBOT_FLEET]
-ROBOT_NAME_TO_IDX = {name: idx for idx, name in enumerate(ROBOT_NAMES)}
+ROBOT_IDX_TO_NAME = {idx: name for name, idx in ROBOT_MAPPING.items()}
+NUM_ROBOTS = len(ROBOT_MAPPING)
+
+# Robot capabilities extracted from dataset instructions
+ROBOT_CAPABILITIES = {
+    "Drone": {
+        "strengths": ["fastest", "aerial navigation", "surveillance", "lightweight transport", "aerial inspection"],
+        "weaknesses": ["limited payload", "loud", "weather dependent", "battery life"],
+        "environments": ["outdoor", "large indoor spaces", "hard to reach areas"],
+        "keywords": ["aerial", "fly", "height", "above", "survey from air", "roof", "exterior", "building"],
+    },
+    "Underwater Robot": {
+        "strengths": ["underwater navigation", "deep sea exploration", "marine inspection", "underwater manipulation"],
+        "weaknesses": ["water environments only", "communication limitations", "pressure constraints"],
+        "environments": ["underwater", "marine", "pools", "pipes", "ocean exploration"],
+        "keywords": ["underwater", "ocean", "sea", "marine", "aquatic", "diving", "submerged", "pipe", "leak"],
+    },
+    "Humanoid": {
+        "strengths": ["manipulation", "walking", "human interaction", "complex tasks", "tool use"],
+        "weaknesses": ["slow movement", "balance issues", "high power consumption"],
+        "environments": ["indoor", "human environments", "stairs", "complex terrain"],
+        "keywords": ["manipulate", "tool", "door", "human", "interact", "stairs", "indoor", "delicate"],
+    },
+    "Robot with Wheels": {
+        "strengths": ["fast movement", "good payload", "stable platform", "efficient"],
+        "weaknesses": ["flat surfaces only", "limited climbing", "obstacle avoidance"],
+        "environments": ["indoor", "warehouse", "flat outdoor areas", "roads"],
+        "keywords": ["transport", "warehouse", "road", "flat", "cargo", "delivery", "fast", "indoor"],
+    },
+    "Robot with Legs": {
+        "strengths": ["rough terrain navigation", "stability", "load carrying", "inspection"],
+        "weaknesses": ["limited manipulation", "height restrictions"],
+        "environments": ["outdoor", "uneven terrain", "stairs", "industrial sites", "search and rescue"],
+        "keywords": ["rough terrain", "climb", "mountain", "rocky", "stairs", "uneven", "rubble", "rescue"],
+    },
+}
 
 
-class RobotSelectionDataset(Dataset):
+class EnhancedRobotSelectionDataset(Dataset):
     """
-    Dataset for robot fleet selection training.
+    Enhanced robot selection dataset with reasoning chains.
 
-    Each sample contains:
-    - Image of an incident/task scenario
-    - Task description
-    - Reasoning chain for robot selection
-    - Selected robot(s)
-    - Action plan
+    Supports:
+    - Single-robot selection (1252 samples)
+    - Multi-robot selection with subtasks (6886 samples)
+    - Chain-of-thought reasoning generation
+    - Data augmentation to 10K+ samples
+    - Scene visualization
     """
 
     def __init__(
@@ -103,268 +92,425 @@ class RobotSelectionDataset(Dataset):
         data_dir: str,
         tokenizer: Any,
         split: str = 'train',
-        max_length: int = 768,
+        max_length: int = 1024,
         image_size: int = 224,
-        transform: Optional[Callable] = None,
+        include_reasoning: bool = True,
+        include_multi_robot: bool = True,
         augment_data: bool = True,
-        augmentation_factor: int = 10,
+        augmentation_factor: int = 3,
+        curriculum_level: Optional[str] = None,  # 'easy', 'medium', 'hard', 'expert'
     ):
         self.data_dir = Path(data_dir)
         self.tokenizer = tokenizer
         self.split = split
         self.max_length = max_length
         self.image_size = image_size
+        self.include_reasoning = include_reasoning
+        self.include_multi_robot = include_multi_robot
         self.augment_data = augment_data and split == 'train'
         self.augmentation_factor = augmentation_factor
+        self.curriculum_level = curriculum_level
 
-        if transform is None:
-            self.transform = transforms.Compose([
-                transforms.Resize((image_size, image_size)),
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    mean=[0.485, 0.456, 0.406],
-                    std=[0.229, 0.224, 0.225]
-                ),
-            ])
+        # Image transform
+        self.transform = transforms.Compose([
+            transforms.Resize((image_size, image_size)),
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225]
+            ),
+        ])
+
+        # Load all data
+        self.samples = self._load_all_data()
+
+        logger.info(f"Loaded {len(self.samples)} samples for {split} split")
+        logger.info(f"  Single-robot: {sum(1 for s in self.samples if s['type'] == 'single')}")
+        logger.info(f"  Multi-robot: {sum(1 for s in self.samples if s['type'] == 'multi')}")
+
+    def _load_all_data(self) -> List[Dict[str, Any]]:
+        """Load both single and multi-robot datasets."""
+        all_samples = []
+
+        # Load single-robot dataset
+        single_path = self.data_dir / 'single_robot_selection.json'
+        if single_path.exists():
+            with open(single_path, 'r', encoding='utf-8') as f:
+                single_data = json.load(f)
+            for item in single_data:
+                sample = self._parse_single_robot(item)
+                if sample:
+                    all_samples.append(sample)
+            logger.info(f"Loaded {len(single_data)} single-robot samples from {single_path}")
         else:
-            self.transform = transform
+            logger.warning(f"Single-robot dataset not found at {single_path}")
 
-        self.samples = self._load_data()
-
-        # Augment if training
-        if self.augment_data:
-            self.samples = self._augment_samples(self.samples)
-
-    def _load_data(self) -> List[Dict[str, Any]]:
-        """Load robot selection data."""
-        samples = []
-
-        # Look for JSON files
-        json_files = list(self.data_dir.glob('*.json'))
-
-        for json_file in json_files:
-            with open(json_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-
-            if isinstance(data, list):
-                for item in data:
-                    sample = self._parse_sample(item)
+        # Load multi-robot dataset if enabled
+        if self.include_multi_robot:
+            multi_path = self.data_dir / 'multi_robot_selection_dataset.json'
+            if multi_path.exists():
+                with open(multi_path, 'r', encoding='utf-8') as f:
+                    multi_data = json.load(f)
+                for item in multi_data:
+                    sample = self._parse_multi_robot(item)
                     if sample:
-                        samples.append(sample)
-            elif isinstance(data, dict):
-                # Single sample or keyed data
-                if 'samples' in data:
-                    for item in data['samples']:
-                        sample = self._parse_sample(item)
-                        if sample:
-                            samples.append(sample)
-                else:
-                    sample = self._parse_sample(data)
-                    if sample:
-                        samples.append(sample)
+                        all_samples.append(sample)
+                logger.info(f"Loaded {len(multi_data)} multi-robot samples from {multi_path}")
+            else:
+                logger.warning(f"Multi-robot dataset not found at {multi_path}")
 
-        # If no data found, create synthetic samples
-        if not samples:
-            samples = self._create_synthetic_samples()
+        if not all_samples:
+            logger.warning("No data found! Creating synthetic samples...")
+            all_samples = self._create_synthetic_samples()
 
-        # Split
-        random.seed(42)
-        random.shuffle(samples)
+        # Apply curriculum filtering if specified
+        if self.curriculum_level:
+            all_samples = self._filter_by_curriculum(all_samples)
 
-        split_idx = int(len(samples) * 0.8)
-        if self.split == 'train':
-            samples = samples[:split_idx]
-        else:
-            samples = samples[split_idx:]
+        # Create deterministic train/val/test split
+        all_samples = self._create_splits(all_samples)
 
-        return samples
+        # Augment training data
+        if self.augment_data and self.split == 'train':
+            original_count = len(all_samples)
+            all_samples = self._augment_samples(all_samples)
+            logger.info(f"Augmented training data from {original_count} to {len(all_samples)} samples")
 
-    def _parse_sample(self, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Parse a single sample."""
+        return all_samples
+
+    def _parse_single_robot(self, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Parse single-robot selection sample."""
         try:
+            task = item['input'].replace('Task: ', '').strip()
+            robot_output = item['output']
+
+            # Parse robot names (can be comma-separated)
+            robot_names = [r.strip() for r in robot_output.split(',')]
+            primary_robot = robot_names[0]
+
+            # Generate reasoning chain
+            reasoning = self._generate_reasoning(task, primary_robot)
+
             return {
-                'image': item.get('image', ''),
-                'instruction': item.get('instruction', item.get('task', '')),
-                'robots': item.get('robots', ROBOT_NAMES),
-                'capabilities': item.get('capabilities', {}),
-                'reasoning_chain': item.get('reasoning_chain', []),
-                'selected_robot': item.get('selected_robot', item.get('robot', '')),
-                'action_plan': item.get('action_plan', ''),
-                'confidence_score': item.get('confidence_score', 0.9),
+                'type': 'single',
+                'task': task,
+                'instruction': item['instruction'],
+                'primary_robot': primary_robot,
+                'all_robots': robot_names,
+                'reasoning': reasoning,
+                'subtasks': None,
+                'difficulty': self._assess_difficulty(task, len(robot_names)),
             }
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Failed to parse single-robot sample: {e}")
             return None
 
-    def _create_synthetic_samples(self) -> List[Dict[str, Any]]:
-        """Create synthetic training samples."""
+    def _parse_multi_robot(self, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Parse multi-robot selection with subtasks."""
+        try:
+            task = item['input'].replace('Task: ', '').strip()
+            subtasks = item['subtasks']
+
+            # Extract robot assignments and execution order
+            robot_assignments = {}
+            for subtask in subtasks:
+                robot = subtask['assigned_robot']
+                order = subtask['execution_order']
+                if robot not in robot_assignments:
+                    robot_assignments[robot] = []
+                robot_assignments[robot].append({
+                    'subtask': subtask['subtask'],
+                    'order': order
+                })
+
+            # Primary robot is the one with most subtasks or earliest order
+            primary_robot = max(robot_assignments.keys(),
+                              key=lambda r: (len(robot_assignments[r]), -min(s['order'] for s in robot_assignments[r])))
+
+            # Generate reasoning for multi-robot coordination
+            reasoning = self._generate_multi_robot_reasoning(task, robot_assignments, subtasks)
+
+            return {
+                'type': 'multi',
+                'task': task,
+                'instruction': item['instruction'],
+                'primary_robot': primary_robot,
+                'all_robots': list(robot_assignments.keys()),
+                'reasoning': reasoning,
+                'subtasks': subtasks,
+                'robot_assignments': robot_assignments,
+                'difficulty': self._assess_difficulty(task, len(robot_assignments)),
+            }
+        except Exception as e:
+            logger.warning(f"Failed to parse multi-robot sample: {e}")
+            return None
+
+    def _generate_reasoning(self, task: str, robot: str) -> List[str]:
+        """Generate chain-of-thought reasoning for single robot selection."""
+        reasoning_steps = []
+
+        # Step 1: Analyze task requirements
+        task_lower = task.lower()
+        requirements = []
+        for keyword in ['inspect', 'survey', 'transport', 'navigate', 'search', 'deliver', 'climb', 'underwater']:
+            if keyword in task_lower:
+                requirements.append(keyword)
+        reasoning_steps.append(f"Task Analysis: Identified key requirements: {', '.join(requirements) if requirements else 'general navigation'}")
+
+        # Step 2: Environment analysis
+        environments = []
+        env_keywords = {
+            'outdoor': ['outdoor', 'field', 'desert', 'mountain', 'forest'],
+            'indoor': ['indoor', 'building', 'warehouse', 'room'],
+            'aerial': ['air', 'roof', 'above', 'height', 'exterior', 'high'],
+            'underwater': ['underwater', 'ocean', 'sea', 'water', 'pipe'],
+            'rough terrain': ['rough', 'rocky', 'rubble', 'stairs', 'climb'],
+        }
+        for env_type, keywords in env_keywords.items():
+            if any(kw in task_lower for kw in keywords):
+                environments.append(env_type)
+        reasoning_steps.append(f"Environment Assessment: {', '.join(environments) if environments else 'standard environment'}")
+
+        # Step 3: Robot capability matching
+        if robot in ROBOT_CAPABILITIES:
+            caps = ROBOT_CAPABILITIES[robot]
+            strengths = caps['strengths'][:2]  # Top 2 strengths
+            reasoning_steps.append(f"Robot Matching: {robot} selected for {', '.join(strengths)}")
+
+        # Step 4: Justification
+        reasoning_steps.append(f"Decision: {robot} is optimal for this task based on environmental constraints and capability requirements")
+
+        return reasoning_steps
+
+    def _generate_multi_robot_reasoning(self, task: str, robot_assignments: Dict, subtasks: List) -> List[str]:
+        """Generate reasoning for multi-robot coordination."""
+        reasoning_steps = []
+
+        # Step 1: Task decomposition
+        reasoning_steps.append(f"Task Decomposition: Complex task requiring {len(robot_assignments)} different robot types")
+
+        # Step 2: Subtask analysis
+        subtask_desc = [s['subtask'][:50] for s in subtasks[:3]]  # First 3 subtasks
+        reasoning_steps.append(f"Subtask Identification: {len(subtasks)} subtasks including: {', '.join(subtask_desc)}")
+
+        # Step 3: Robot assignment strategy
+        for robot, tasks in robot_assignments.items():
+            reasoning_steps.append(f"{robot} Assignment: {len(tasks)} subtask(s) - primary role in {tasks[0]['subtask'][:40]}")
+
+        # Step 4: Execution coordination
+        execution_orders = sorted(set(s['execution_order'] for s in subtasks))
+        reasoning_steps.append(f"Execution Plan: {len(execution_orders)} phases with coordinated robot deployment")
+
+        return reasoning_steps
+
+    def _assess_difficulty(self, task: str, num_robots: int) -> str:
+        """Assess task difficulty for curriculum learning."""
+        task_lower = task.lower()
+
+        # Easy: Single robot, obvious match
+        if num_robots == 1:
+            for robot, caps in ROBOT_CAPABILITIES.items():
+                if any(kw in task_lower for kw in caps['keywords'][:2]):
+                    return 'easy'
+
+        # Medium: Single robot but requires reasoning
+        if num_robots == 1:
+            return 'medium'
+
+        # Hard: Multiple robots (2-3)
+        if num_robots <= 3:
+            return 'hard'
+
+        # Expert: Complex multi-robot (4+)
+        return 'expert'
+
+    def _filter_by_curriculum(self, samples: List[Dict]) -> List[Dict]:
+        """Filter samples by curriculum difficulty."""
+        filtered = [s for s in samples if s['difficulty'] == self.curriculum_level]
+        if not filtered:
+            logger.warning(f"No samples found for curriculum level {self.curriculum_level}, using all samples")
+            return samples
+        return filtered
+
+    def _create_splits(self, samples: List[Dict]) -> List[Dict]:
+        """Create deterministic train/val/test split (70/20/10)."""
+        # Use hash of task for deterministic splitting
+        def get_split(task: str) -> str:
+            hash_val = int(hashlib.md5(task.encode()).hexdigest(), 16)
+            if hash_val % 100 < 70:
+                return 'train'
+            elif hash_val % 100 < 90:
+                return 'val'
+            else:
+                return 'test'
+
+        # Filter by split
+        filtered = [s for s in samples if get_split(s['task']) == self.split]
+
+        # Shuffle within split (with fixed seed for reproducibility)
+        random.seed(42)
+        random.shuffle(filtered)
+
+        return filtered
+
+    def _augment_samples(self, samples: List[Dict]) -> List[Dict]:
+        """Augment training samples with variations."""
+        augmented = []
+
+        for sample in samples:
+            # Add original
+            augmented.append(sample)
+
+            # Create variations
+            for aug_idx in range(self.augmentation_factor - 1):
+                aug_sample = self._create_augmentation(sample, aug_idx)
+                augmented.append(aug_sample)
+
+        return augmented
+
+    def _create_augmentation(self, sample: Dict, aug_idx: int) -> Dict:
+        """Create an augmented version of a sample."""
+        aug_sample = sample.copy()
+
+        # Paraphrase task description
+        task = sample['task']
+        task = self._paraphrase_task(task, aug_idx)
+        aug_sample['task'] = task
+
+        # Add slight variation to reasoning
+        if sample['reasoning']:
+            aug_sample['reasoning'] = sample['reasoning'].copy()
+            # Reorder some reasoning steps randomly
+            if len(aug_sample['reasoning']) > 2 and random.random() > 0.5:
+                # Swap two middle steps
+                mid = len(aug_sample['reasoning']) // 2
+                aug_sample['reasoning'][mid-1], aug_sample['reasoning'][mid] = \
+                    aug_sample['reasoning'][mid], aug_sample['reasoning'][mid-1]
+
+        return aug_sample
+
+    def _paraphrase_task(self, task: str, aug_idx: int) -> str:
+        """Paraphrase task description."""
+        synonyms = {
+            'inspect': ['examine', 'check', 'assess', 'evaluate'],
+            'survey': ['scan', 'map', 'assess', 'overview'],
+            'transport': ['carry', 'deliver', 'move', 'convey'],
+            'navigate': ['traverse', 'cross', 'travel through', 'pass through'],
+            'search': ['look for', 'find', 'locate', 'seek'],
+            'monitor': ['watch', 'observe', 'track', 'supervise'],
+            'deliver': ['bring', 'transport', 'carry', 'convey'],
+            'explore': ['investigate', 'examine', 'survey', 'scout'],
+        }
+
+        words = task.split()
+        for i, word in enumerate(words):
+            word_lower = word.lower().strip('.,!?')
+            if word_lower in synonyms and random.random() > 0.5:
+                replacement = synonyms[word_lower][aug_idx % len(synonyms[word_lower])]
+                # Preserve capitalization
+                if word[0].isupper():
+                    replacement = replacement.capitalize()
+                words[i] = replacement
+
+        return ' '.join(words)
+
+    def _create_synthetic_samples(self) -> List[Dict]:
+        """Create synthetic samples if no data available."""
+        logger.warning("Creating 100 synthetic samples...")
+        samples = []
+
         scenarios = [
-            {
-                "task": "Survey damage from aerial perspective after earthquake",
-                "robot": "Drone",
-                "reasoning": [
-                    "Identify key requirements: aerial view, quick assessment, wide coverage",
-                    "Evaluate terrain: urban area with collapsed buildings",
-                    "Consider safety: ground access may be dangerous",
-                    "Match capabilities: Drone provides aerial survey capability"
-                ],
-                "action": "Deploy drone for systematic aerial grid survey of affected area"
-            },
-            {
-                "task": "Navigate through rubble to search for survivors",
-                "robot": "Legged",
-                "reasoning": [
-                    "Identify key requirements: traverse uneven terrain, navigate obstacles",
-                    "Evaluate terrain: collapsed structures, debris, unstable surfaces",
-                    "Consider safety: wheeled robots cannot access this terrain",
-                    "Match capabilities: Legged robot can climb over obstacles"
-                ],
-                "action": "Deploy legged robot to systematically search rubble piles"
-            },
-            {
-                "task": "Transport heavy medical supplies to disaster zone",
-                "robot": "Wheeled",
-                "reasoning": [
-                    "Identify key requirements: heavy payload, long range transport",
-                    "Evaluate terrain: roads available but congested",
-                    "Consider efficiency: need maximum cargo capacity",
-                    "Match capabilities: Wheeled robot has 100kg payload, 8hr battery"
-                ],
-                "action": "Load wheeled robot with supplies and navigate via clear routes"
-            },
-            {
-                "task": "Inspect underwater pipeline for damage after flood",
-                "robot": "Underwater",
-                "reasoning": [
-                    "Identify key requirements: underwater operation, visual inspection",
-                    "Evaluate environment: flooded area with submerged infrastructure",
-                    "Consider access: only aquatic robot can reach target",
-                    "Match capabilities: Underwater robot designed for aquatic operations"
-                ],
-                "action": "Deploy underwater robot to follow pipeline route and document damage"
-            },
-            {
-                "task": "Open doors and manipulate tools in damaged building",
-                "robot": "Humanoid",
-                "reasoning": [
-                    "Identify key requirements: fine manipulation, tool use, door operation",
-                    "Evaluate environment: indoor building with human-scale obstacles",
-                    "Consider capabilities: requires human-like manipulation",
-                    "Match capabilities: Humanoid robot can operate human tools and doors"
-                ],
-                "action": "Deploy humanoid to navigate building and perform manipulation tasks"
-            },
+            ("Survey agricultural fields from above", "Drone", 'easy'),
+            ("Inspect underwater pipeline for damage", "Underwater Robot", 'easy'),
+            ("Navigate rough mountain terrain", "Robot with Legs", 'medium'),
+            ("Transport heavy cargo in warehouse", "Robot with Wheels", 'easy'),
+            ("Manipulate tools in indoor environment", "Humanoid", 'medium'),
         ]
 
-        samples = []
-        for scenario in scenarios:
+        for task, robot, difficulty in scenarios * 20:  # Repeat to get 100 samples
+            reasoning = self._generate_reasoning(task, robot)
             samples.append({
-                'image': '',  # Will use placeholder
-                'instruction': scenario['task'],
-                'robots': ROBOT_NAMES,
-                'capabilities': {r['name']: r['capabilities'] for r in ROBOT_FLEET},
-                'reasoning_chain': scenario['reasoning'],
-                'selected_robot': scenario['robot'],
-                'action_plan': scenario['action'],
-                'confidence_score': 0.9,
+                'type': 'single',
+                'task': task,
+                'instruction': "Select the most appropriate robot for this task.",
+                'primary_robot': robot,
+                'all_robots': [robot],
+                'reasoning': reasoning,
+                'subtasks': None,
+                'difficulty': difficulty,
             })
 
         return samples
 
-    def _augment_samples(
-        self,
-        samples: List[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
-        """Augment samples with variations."""
-        augmented = []
+    def _generate_scene_image(self, task: str, robot: str) -> Image.Image:
+        """Generate a simple scene visualization."""
+        # Create blank image
+        img = Image.new('RGB', (self.image_size, self.image_size), color='white')
+        draw = ImageDraw.Draw(img)
 
-        # Task variations
-        task_synonyms = {
-            "survey": ["inspect", "examine", "assess", "evaluate"],
-            "navigate": ["traverse", "move through", "cross", "travel across"],
-            "transport": ["carry", "deliver", "move", "bring"],
-            "search": ["look for", "find", "locate", "seek"],
-        }
+        # Try to load a default font, fall back to default if not available
+        try:
+            font = ImageFont.truetype("arial.ttf", 16)
+            small_font = ImageFont.truetype("arial.ttf", 12)
+        except:
+            font = ImageFont.load_default()
+            small_font = font
 
-        for sample in samples:
-            augmented.append(sample)
+        # Draw task type indicator
+        task_lower = task.lower()
+        if 'aerial' in task_lower or 'above' in task_lower or 'roof' in task_lower:
+            # Draw sky
+            draw.rectangle([0, 0, self.image_size, self.image_size//3], fill='lightblue')
+            draw.text((10, 10), "Aerial Task", fill='black', font=font)
+        elif 'underwater' in task_lower or 'ocean' in task_lower:
+            # Draw water
+            draw.rectangle([0, 0, self.image_size, self.image_size], fill='darkblue')
+            draw.text((10, 10), "Underwater Task", fill='white', font=font)
+        elif 'indoor' in task_lower or 'building' in task_lower:
+            # Draw building
+            draw.rectangle([20, 40, self.image_size-20, self.image_size-20], fill='lightgray', outline='black')
+            draw.text((10, 10), "Indoor Task", fill='black', font=font)
+        else:
+            # Draw outdoor ground
+            draw.rectangle([0, self.image_size//2, self.image_size, self.image_size], fill='lightgreen')
+            draw.text((10, 10), "Outdoor Task", fill='black', font=font)
 
-            for _ in range(self.augmentation_factor - 1):
-                new_sample = sample.copy()
+        # Draw robot indicator
+        draw.text((10, self.image_size - 30), f"Robot: {robot}", fill='red', font=small_font)
 
-                # Vary instruction
-                instruction = new_sample['instruction']
-                for word, synonyms in task_synonyms.items():
-                    if word in instruction.lower():
-                        replacement = random.choice(synonyms)
-                        instruction = instruction.lower().replace(word, replacement)
-                        instruction = instruction[0].upper() + instruction[1:]
-                        break
+        return img
 
-                new_sample['instruction'] = instruction
-                augmented.append(new_sample)
+    def _format_prompt(self, sample: Dict) -> str:
+        """Format training prompt with reasoning chain."""
+        parts = []
 
-        return augmented
+        # Instruction
+        parts.append(f"Instruction: {sample['instruction'][:200]}")
 
-    def _load_image(self, image_path: str) -> torch.Tensor:
-        """Load image or create placeholder."""
-        if image_path and os.path.exists(image_path):
-            try:
-                image = Image.open(image_path).convert('RGB')
-                return self.transform(image)
-            except Exception:
-                pass
+        # Task
+        parts.append(f"\nTask: {sample['task']}")
 
-        # If path doesn't exist, try relative paths
-        if image_path:
-            possible_paths = [
-                self.data_dir / 'images' / image_path,
-                self.data_dir / image_path,
-            ]
-            for path in possible_paths:
-                if path.exists():
-                    try:
-                        image = Image.open(path).convert('RGB')
-                        return self.transform(image)
-                    except Exception:
-                        pass
-
-        # Return placeholder (noise image for training)
-        return torch.randn(3, self.image_size, self.image_size) * 0.1
-
-    def _create_prompt(self, sample: Dict[str, Any]) -> str:
-        """Create training prompt with reasoning chain."""
-        instruction = sample['instruction']
-
-        # Add robot fleet info
-        fleet_info = "Available robots: " + ", ".join(ROBOT_NAMES)
+        # For multi-robot, include subtask information
+        if sample['type'] == 'multi' and sample['subtasks']:
+            parts.append(f"\nSubtasks: {len(sample['subtasks'])} identified")
+            for i, subtask in enumerate(sample['subtasks'][:3]):  # Show first 3
+                parts.append(f"  {i+1}. {subtask['subtask']} (Order: {subtask['execution_order']})")
 
         # Reasoning chain
-        reasoning_text = ""
-        if sample['reasoning_chain']:
-            steps = "\n".join([
-                f"Step {i+1}: {step}"
-                for i, step in enumerate(sample['reasoning_chain'])
-            ])
-            reasoning_text = f"\n<|reasoning_start|>\n{steps}\n<|reasoning_end|>\n"
+        if self.include_reasoning and sample['reasoning']:
+            parts.append("\n<|reasoning_start|>")
+            for i, step in enumerate(sample['reasoning'], 1):
+                parts.append(f"Step {i}: {step}")
+            parts.append("<|reasoning_end|>")
 
         # Robot selection
-        robot_text = f"<|robot_selection|>{sample['selected_robot']}"
+        parts.append(f"\n<|robot_selection|>{sample['primary_robot']}")
 
-        # Action plan
-        action_text = ""
-        if sample['action_plan']:
-            action_text = f"\n<|action_plan|>{sample['action_plan']}"
+        # For multi-robot, list all assigned robots
+        if sample['type'] == 'multi' and len(sample['all_robots']) > 1:
+            parts.append(f"Additional robots: {', '.join(sample['all_robots'][1:])}")
 
-        full_text = (
-            f"Task: {instruction}\n"
-            f"{fleet_info}\n"
-            f"Analyze this incident scene and select the most appropriate robot from the fleet."
-            f"{reasoning_text}"
-            f"{robot_text}"
-            f"{action_text}"
-        )
-
-        return full_text
+        return "\n".join(parts)
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -372,11 +518,12 @@ class RobotSelectionDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         sample = self.samples[idx]
 
-        # Load image
-        pixel_values = self._load_image(sample['image'])
+        # Generate scene image
+        img = self._generate_scene_image(sample['task'], sample['primary_robot'])
+        pixel_values = self.transform(img)
 
         # Create prompt
-        text = self._create_prompt(sample)
+        text = self._format_prompt(sample)
 
         # Tokenize
         encoding = self.tokenizer(
@@ -390,13 +537,18 @@ class RobotSelectionDataset(Dataset):
         input_ids = encoding['input_ids'].squeeze(0)
         attention_mask = encoding['attention_mask'].squeeze(0)
 
-        # Labels
+        # Labels for language modeling
         labels = input_ids.clone()
         labels[labels == self.tokenizer.pad_token_id] = -100
 
-        # Robot target
-        robot_name = sample['selected_robot']
-        robot_target = ROBOT_NAME_TO_IDX.get(robot_name, 0)
+        # Robot target (primary robot index)
+        robot_target = ROBOT_MAPPING.get(sample['primary_robot'], 0)
+
+        # Multi-robot target (multi-hot encoding)
+        multi_robot_target = torch.zeros(NUM_ROBOTS)
+        for robot_name in sample['all_robots']:
+            if robot_name in ROBOT_MAPPING:
+                multi_robot_target[ROBOT_MAPPING[robot_name]] = 1.0
 
         return {
             'pixel_values': pixel_values,
@@ -404,7 +556,10 @@ class RobotSelectionDataset(Dataset):
             'attention_mask': attention_mask,
             'labels': labels,
             'robot_target': torch.tensor(robot_target, dtype=torch.long),
-            'confidence': torch.tensor(sample['confidence_score'], dtype=torch.float),
+            'multi_robot_target': multi_robot_target,
+            'is_multi_robot': torch.tensor(1.0 if sample['type'] == 'multi' else 0.0),
+            'difficulty': sample['difficulty'],
+            'task_description': sample['task'],
         }
 
 
@@ -417,13 +572,15 @@ def get_robot_selection_dataloader(
     num_workers: int = 4,
     **kwargs,
 ) -> DataLoader:
-    """Create dataloader for robot selection data."""
-    dataset = RobotSelectionDataset(
+    """Create enhanced dataloader for robot selection."""
+    dataset = EnhancedRobotSelectionDataset(
         data_dir=data_dir,
         tokenizer=tokenizer,
         split=split,
         **kwargs,
     )
+
+    logger.info(f"Created {split} dataset with {len(dataset)} samples")
 
     sampler = None
     if distributed and split == 'train' and dist.is_initialized():
@@ -437,31 +594,6 @@ def get_robot_selection_dataloader(
         num_workers=num_workers,
         pin_memory=True,
         drop_last=(split == 'train'),
+        collate_fn=None,  # Use default collate
     )
-
-
-def create_robot_selection_dataset(
-    output_dir: str,
-    num_samples: int = 100,
-):
-    """Create a sample robot selection dataset."""
-    os.makedirs(output_dir, exist_ok=True)
-
-    # Create sample data
-    dataset = RobotSelectionDataset(
-        data_dir=output_dir,
-        tokenizer=None,
-        split='train',
-        augment_data=False,
-    )
-
-    samples = dataset._create_synthetic_samples()
-
-    # Save to JSON
-    output_file = Path(output_dir) / 'multi-robot-selection.json'
-    with open(output_file, 'w') as f:
-        json.dump(samples, f, indent=2)
-
-    print(f"Created {len(samples)} samples at {output_file}")
-    return str(output_file)
 
