@@ -134,20 +134,20 @@ class AlignmentDataset(BaseVLMDataset):
         """Load CC3M data from Arrow files."""
         samples = []
 
-        # CC3M is stored directly in data/base_vlm/cc3m/ as arrow files
+        # CC3M Arrow files are stored directly in data/base_vlm/cc3m/ directory
         cc3m_dir = self.data_dir / 'cc3m'
 
         if not cc3m_dir.exists():
             logger.debug("CC3M directory not found")
             return samples
 
-        if not ARROW_AVAILABLE:
-            logger.warning("PyArrow not available - skipping CC3M")
+        if not ARROW_AVAILABLE or not PANDAS_AVAILABLE:
+            logger.warning("PyArrow or Pandas not available - skipping CC3M")
             return samples
 
         try:
-            # Find all Arrow files
-            arrow_files = list(cc3m_dir.glob('*.arrow'))
+            # Find all Arrow files directly in cc3m directory
+            arrow_files = sorted(cc3m_dir.glob('cc3m-wds-train-*.arrow'))
 
             if not arrow_files:
                 logger.debug("No CC3M Arrow files found")
@@ -155,19 +155,24 @@ class AlignmentDataset(BaseVLMDataset):
 
             logger.info(f"Loading CC3M from {len(arrow_files)} Arrow files...")
 
-            # Limit total samples to avoid OOM
+            # Limit total samples to avoid OOM - CC3M is huge
             samples_limit = 500000
-            samples_per_file = samples_limit // len(arrow_files) if len(arrow_files) > 0 else samples_limit
+            samples_per_file = max(1000, samples_limit // len(arrow_files))
 
             failed_files = 0
+            loaded_files = 0
+
             for arrow_file in arrow_files:
+                if len(samples) >= samples_limit:
+                    break
+
                 try:
                     # Read Arrow file
-                    table = pa.ipc.open_file(arrow_file).read_all()
+                    table = pa.ipc.open_file(str(arrow_file)).read_all()
                     df = table.to_pandas()
 
                     # Limit samples from this file
-                    file_samples = min(len(df), samples_per_file)
+                    file_samples = min(len(df), samples_per_file, samples_limit - len(samples))
 
                     for idx in range(file_samples):
                         try:
@@ -177,8 +182,11 @@ class AlignmentDataset(BaseVLMDataset):
                             caption = None
                             for col in ['caption', 'text', 'txt']:
                                 if col in df.columns and pd.notna(row[col]):
-                                    caption = str(row[col])
+                                    caption = str(row[col]).strip()
                                     break
+
+                            if not caption:
+                                continue
 
                             # Extract image - CC3M uses 'jpg' column with bytes
                             image = None
@@ -186,16 +194,25 @@ class AlignmentDataset(BaseVLMDataset):
                                 import io
                                 try:
                                     image_bytes = row['jpg']
-                                    image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
-                                    image.load()  # Force load to verify
-                                except:
+                                    if isinstance(image_bytes, bytes) and len(image_bytes) > 0:
+                                        image = Image.open(io.BytesIO(image_bytes))
+                                        if image.mode != 'RGB':
+                                            image = image.convert('RGB')
+                                        image.load()  # Force load to verify
+                                except Exception as img_err:
+                                    logger.debug(f"Failed to decode image: {img_err}")
                                     continue
                             elif 'image' in df.columns and row['image'] is not None:
                                 # Already a PIL image
-                                image = row['image']
-                                if image.mode != 'RGB':
-                                    image = image.convert('RGB')
-                                image.load()
+                                try:
+                                    image = row['image']
+                                    if not isinstance(image, Image.Image):
+                                        continue
+                                    if image.mode != 'RGB':
+                                        image = image.convert('RGB')
+                                    image.load()
+                                except:
+                                    continue
 
                             if caption and image is not None:
                                 samples.append({
@@ -207,10 +224,10 @@ class AlignmentDataset(BaseVLMDataset):
                                 break
 
                         except Exception as e:
+                            logger.debug(f"Failed to process row {idx}: {e}")
                             continue
 
-                    if len(samples) >= samples_limit:
-                        break
+                    loaded_files += 1
 
                 except Exception as e:
                     logger.debug(f"Failed to load {arrow_file.name}: {e}")
@@ -218,9 +235,9 @@ class AlignmentDataset(BaseVLMDataset):
                     continue
 
             if samples:
-                logger.info(f"✓ Loaded {len(samples):,} samples from CC3M")
+                logger.info(f"✓ Loaded {len(samples):,} samples from CC3M ({loaded_files} files)")
             else:
-                logger.warning(f"✗ No samples loaded from CC3M (failed: {failed_files} files)")
+                logger.warning(f"✗ No samples loaded from CC3M (failed: {failed_files}/{len(arrow_files)} files)")
 
         except Exception as e:
             logger.warning(f"Failed to load CC3M dataset: {e}")
@@ -234,7 +251,7 @@ class AlignmentDataset(BaseVLMDataset):
         if not ARROW_AVAILABLE or not PANDAS_AVAILABLE:
             return samples
 
-        # Check for RefCOCO variants
+        # Check for RefCOCO variants - they're in nested directories
         refcoco_dirs = [
             ('refcoco', self.data_dir / 'refcoco'),
             ('refcoco_plus', self.data_dir / 'refcoco_plus'),
@@ -257,16 +274,22 @@ class AlignmentDataset(BaseVLMDataset):
             if not refcoco_dir.exists():
                 continue
 
-            # Find Arrow files
-            arrow_files = list(refcoco_dir.glob('*.arrow'))
+            # Arrow files are directly in the refcoco directory (no nested subdirs in your structure)
+            arrow_files = sorted(refcoco_dir.glob('*.arrow'))
+
             if not arrow_files:
+                logger.debug(f"No Arrow files found in {dataset_name}")
                 continue
 
             logger.info(f"Loading {dataset_name} from {len(arrow_files)} Arrow files...")
 
             for arrow_file in arrow_files:
+                # Skip dataset_info.json or lock files
+                if 'dataset_info' in arrow_file.name or '.lock' in arrow_file.name:
+                    continue
+
                 try:
-                    table = pa.ipc.open_file(arrow_file).read_all()
+                    table = pa.ipc.open_file(str(arrow_file)).read_all()
                     df = table.to_pandas()
 
                     for idx in range(len(df)):
@@ -277,7 +300,7 @@ class AlignmentDataset(BaseVLMDataset):
                             caption = None
                             for col in ['sent', 'caption', 'sentence', 'text']:
                                 if col in df.columns and pd.notna(row[col]):
-                                    caption = str(row[col])
+                                    caption = str(row[col]).strip()
                                     break
 
                             # Extract image ID
@@ -288,17 +311,25 @@ class AlignmentDataset(BaseVLMDataset):
                                     break
 
                             if caption and image_id:
-                                # Try to find image
+                                # Try to find image - RefCOCO uses COCO 2014 images
                                 image_filename = f"COCO_train2014_{int(image_id):012d}.jpg"
+                                image_filename_val = f"COCO_val2014_{int(image_id):012d}.jpg"
+
                                 for img_dir in coco_img_dirs:
-                                    candidate = img_dir / image_filename
-                                    if candidate.exists():
-                                        samples.append({
-                                            'image': str(candidate),
-                                            'caption': caption,
-                                        })
-                                        break
-                        except:
+                                    for fname in [image_filename, image_filename_val]:
+                                        candidate = img_dir / fname
+                                        if candidate.exists():
+                                            samples.append({
+                                                'image': str(candidate),
+                                                'caption': caption,
+                                            })
+                                            break
+                                    else:
+                                        continue
+                                    break
+
+                        except Exception as e:
+                            logger.debug(f"Failed to process row: {e}")
                             continue
 
                 except Exception as e:
@@ -334,22 +365,35 @@ class AlignmentDataset(BaseVLMDataset):
 
         logger.info(f"Found {len(json_files)} JSON files to process")
 
-        # Skip metadata files and non-VL datasets
+        # Skip metadata files and non-VL datasets based on actual file structure
         skip_patterns = [
             'download_summary',     # Download metadata
-            'dataset_info',         # HuggingFace dataset metadata
+            'dataset_info',         # HuggingFace dataset metadata (refcoco/refcoco+/refcocog dirs)
             'instances_',           # COCO object detection (not VL)
             'person_keypoints_',    # COCO pose estimation (not VL)
             '__MACOSX',             # Mac OS metadata folder
             '.lock',                # Lock files
             '_builder.lock',        # HF builder locks
             '_incomplete',          # Incomplete downloads
+            'dataset.json',         # OCR-VQA has empty dataset.json file
+            'readme.txt',           # Documentation files
+            'LICENCE.txt',          # License files
+            'loadDataset.py',       # Python scripts
+            '.py',                  # Any Python files
+            '.csv',                 # CSV files (not primary data format)
+            '.download_attempted',  # Download markers
         ]
 
         for json_file in json_files:
             # Skip metadata files
-            if any(pattern in json_file.name.lower() for pattern in skip_patterns):
-                logger.debug(f"Skipping metadata file: {json_file.name}")
+            file_name_lower = json_file.name.lower()
+            if any(pattern in file_name_lower for pattern in skip_patterns):
+                logger.debug(f"Skipping metadata/non-data file: {json_file.name}")
+                continue
+
+            # Skip files in __MACOSX directories
+            if '__MACOSX' in str(json_file):
+                logger.debug(f"Skipping Mac metadata file: {json_file}")
                 continue
 
             logger.info(f"Processing file: {json_file}")
