@@ -72,6 +72,7 @@ class WandbLogger:
         tags: Optional[List[str]] = None,
         notes: Optional[str] = None,
         mode: str = "online",
+        **kwargs,  # Accept extra kwargs like output_dir for compatibility
     ):
         self.project = project
         self.name = name
