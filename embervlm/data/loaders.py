@@ -17,6 +17,12 @@ from PIL import Image
 import torchvision.transforms as transforms
 
 try:
+    import pandas as pd
+    PANDAS_AVAILABLE = True
+except ImportError:
+    PANDAS_AVAILABLE = False
+
+try:
     import pyarrow as pa
     import pyarrow.parquet as pq
     ARROW_AVAILABLE = True
@@ -67,7 +73,13 @@ class BaseVLMDataset(Dataset):
         try:
             # Check if input is already a PIL Image (e.g., from CC3M)
             if isinstance(image_input, Image.Image):
-                image = image_input.convert('RGB')
+                # Ensure image is in RGB mode and properly loaded
+                if image_input.mode != 'RGB':
+                    image = image_input.convert('RGB')
+                else:
+                    image = image_input
+                # Ensure image data is loaded
+                image.load()
             else:
                 # It's a path string
                 image_path = image_input
@@ -77,6 +89,8 @@ class BaseVLMDataset(Dataset):
 
             return self.transform(image)
         except Exception as e:
+            import logging
+            logging.getLogger(__name__).debug(f"Failed to load image: {e}")
             # Return black image on error
             return torch.zeros(3, self.image_size, self.image_size)
 
@@ -117,98 +131,182 @@ class AlignmentDataset(BaseVLMDataset):
     """Dataset for Stage 1 visual-language alignment - supports multiple dataset formats."""
 
     def _load_cc3m_arrow(self, logger) -> List[Dict[str, Any]]:
-        """Load CC3M data from HuggingFace dataset format."""
+        """Load CC3M data from Arrow files."""
         samples = []
-        cc3m_cache_dir = self.data_dir / 'cc3m' / 'dataset'
 
-        if not cc3m_cache_dir.exists():
-            logger.debug("CC3M dataset directory not found")
+        # CC3M is stored directly in data/base_vlm/cc3m/ as arrow files
+        cc3m_dir = self.data_dir / 'cc3m'
+
+        if not cc3m_dir.exists():
+            logger.debug("CC3M directory not found")
+            return samples
+
+        if not ARROW_AVAILABLE:
+            logger.warning("PyArrow not available - skipping CC3M")
             return samples
 
         try:
-            # Try to load using HuggingFace datasets library
-            from datasets import load_from_disk, load_dataset
+            # Find all Arrow files
+            arrow_files = list(cc3m_dir.glob('*.arrow'))
 
-            logger.info("Loading CC3M dataset from HuggingFace format...")
+            if not arrow_files:
+                logger.debug("No CC3M Arrow files found")
+                return samples
 
-            # Limit to 500K samples for CC3M to avoid OOM
+            logger.info(f"Loading CC3M from {len(arrow_files)} Arrow files...")
+
+            # Limit total samples to avoid OOM
             samples_limit = 500000
+            samples_per_file = samples_limit // len(arrow_files) if len(arrow_files) > 0 else samples_limit
 
-            # Try to load from disk cache first
-            dataset = None
-            try:
-                dataset = load_dataset(
-                    "pixparse/cc3m-wds",
-                    cache_dir=str(cc3m_cache_dir),
-                    split='train'
-                )
-            except Exception as e:
-                logger.debug(f"Could not load from HF cache: {e}")
-                return samples
-
-            if dataset is None:
-                logger.debug("CC3M dataset not found in cache")
-                return samples
-
-            # Get total samples
-            total_samples = len(dataset)
-            logger.info(f"Found {total_samples:,} samples in CC3M dataset")
-
-            # Sample indices
-            import numpy as np
-            if total_samples > samples_limit:
-                indices = np.random.choice(total_samples, samples_limit, replace=False)
-            else:
-                indices = range(total_samples)
-
-            # Extract caption and image
-            for idx in indices:
+            failed_files = 0
+            for arrow_file in arrow_files:
                 try:
-                    item = dataset[int(idx)]
-                    caption = None
-                    image = None
+                    # Read Arrow file
+                    table = pa.ipc.open_file(arrow_file).read_all()
+                    df = table.to_pandas()
 
-                    # Try different column names for caption
-                    if 'caption' in item:
-                        caption = str(item['caption'])
-                    elif 'text' in item:
-                        caption = str(item['text'])
-                    elif 'txt' in item:
-                        caption = str(item['txt'])
+                    # Limit samples from this file
+                    file_samples = min(len(df), samples_per_file)
 
-                    # Try different column names for image
-                    if 'image' in item:
-                        # HuggingFace stores PIL images directly
-                        image = item['image']  # This is a PIL Image object
-                    elif 'jpg' in item:
-                        # Image stored as bytes - convert to PIL
-                        import io
-                        from PIL import Image
-                        image_bytes = item['jpg']
-                        image = Image.open(io.BytesIO(image_bytes))
+                    for idx in range(file_samples):
+                        try:
+                            row = df.iloc[idx]
 
-                    if caption and image is not None:
-                        samples.append({
-                            'image': image,  # Store PIL Image directly
-                            'caption': caption,
-                        })
+                            # Extract caption
+                            caption = None
+                            for col in ['caption', 'text', 'txt']:
+                                if col in df.columns and pd.notna(row[col]):
+                                    caption = str(row[col])
+                                    break
+
+                            # Extract image - CC3M uses 'jpg' column with bytes
+                            image = None
+                            if 'jpg' in df.columns and row['jpg'] is not None:
+                                import io
+                                try:
+                                    image_bytes = row['jpg']
+                                    image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
+                                    image.load()  # Force load to verify
+                                except:
+                                    continue
+                            elif 'image' in df.columns and row['image'] is not None:
+                                # Already a PIL image
+                                image = row['image']
+                                if image.mode != 'RGB':
+                                    image = image.convert('RGB')
+                                image.load()
+
+                            if caption and image is not None:
+                                samples.append({
+                                    'image': image,
+                                    'caption': caption,
+                                })
+
+                            if len(samples) >= samples_limit:
+                                break
+
+                        except Exception as e:
+                            continue
 
                     if len(samples) >= samples_limit:
                         break
 
                 except Exception as e:
-                    # Skip failed samples
+                    logger.debug(f"Failed to load {arrow_file.name}: {e}")
+                    failed_files += 1
                     continue
 
             if samples:
-                logger.info(f"✓ Loaded {len(samples):,} samples from CC3M dataset")
+                logger.info(f"✓ Loaded {len(samples):,} samples from CC3M")
             else:
-                logger.warning("✗ No samples loaded from CC3M dataset")
+                logger.warning(f"✗ No samples loaded from CC3M (failed: {failed_files} files)")
 
-        except ImportError:
-            logger.warning("HuggingFace datasets library not available - skipping CC3M")
         except Exception as e:
             logger.warning(f"Failed to load CC3M dataset: {e}")
+
+        return samples
+
+    def _load_refcoco_arrow(self, logger) -> List[Dict[str, Any]]:
+        """Load RefCOCO/RefCOCO+/RefCOCOg data from Arrow files."""
+        samples = []
+
+        if not ARROW_AVAILABLE or not PANDAS_AVAILABLE:
+            return samples
+
+        # Check for RefCOCO variants
+        refcoco_dirs = [
+            ('refcoco', self.data_dir / 'refcoco'),
+            ('refcoco_plus', self.data_dir / 'refcoco_plus'),
+            ('refcocog', self.data_dir / 'refcocog'),
+        ]
+
+        # Find COCO images directory
+        coco_img_dirs = []
+        coco_dir = self.data_dir / 'coco'
+        if coco_dir.exists():
+            for pattern in ['train2014', 'val2014', 'train2017', 'val2017']:
+                found = list(coco_dir.glob(pattern))
+                coco_img_dirs.extend(found)
+
+        if not coco_img_dirs:
+            logger.debug("COCO image directories not found for RefCOCO")
+            return samples
+
+        for dataset_name, refcoco_dir in refcoco_dirs:
+            if not refcoco_dir.exists():
+                continue
+
+            # Find Arrow files
+            arrow_files = list(refcoco_dir.glob('*.arrow'))
+            if not arrow_files:
+                continue
+
+            logger.info(f"Loading {dataset_name} from {len(arrow_files)} Arrow files...")
+
+            for arrow_file in arrow_files:
+                try:
+                    table = pa.ipc.open_file(arrow_file).read_all()
+                    df = table.to_pandas()
+
+                    for idx in range(len(df)):
+                        try:
+                            row = df.iloc[idx]
+
+                            # Extract referring expression
+                            caption = None
+                            for col in ['sent', 'caption', 'sentence', 'text']:
+                                if col in df.columns and pd.notna(row[col]):
+                                    caption = str(row[col])
+                                    break
+
+                            # Extract image ID
+                            image_id = None
+                            for col in ['image_id', 'imageId', 'image']:
+                                if col in df.columns and pd.notna(row[col]):
+                                    image_id = row[col]
+                                    break
+
+                            if caption and image_id:
+                                # Try to find image
+                                image_filename = f"COCO_train2014_{int(image_id):012d}.jpg"
+                                for img_dir in coco_img_dirs:
+                                    candidate = img_dir / image_filename
+                                    if candidate.exists():
+                                        samples.append({
+                                            'image': str(candidate),
+                                            'caption': caption,
+                                        })
+                                        break
+                        except:
+                            continue
+
+                except Exception as e:
+                    logger.debug(f"Failed to load {arrow_file.name}: {e}")
+                    continue
+
+            if samples:
+                logger.info(f"✓ Loaded {len(samples):,} samples from {dataset_name}")
 
         return samples
 
@@ -219,9 +317,13 @@ class AlignmentDataset(BaseVLMDataset):
 
         samples = []
 
-        # First, load CC3M from Arrow files
+        # Load CC3M from Arrow files
         cc3m_samples = self._load_cc3m_arrow(logger)
         samples.extend(cc3m_samples)
+
+        # Load RefCOCO variants from Arrow files
+        refcoco_samples = self._load_refcoco_arrow(logger)
+        samples.extend(refcoco_samples)
 
         # Recursively search for JSON files in subdirectories
         json_files = list(self.data_dir.rglob('*.json'))
@@ -232,13 +334,16 @@ class AlignmentDataset(BaseVLMDataset):
 
         logger.info(f"Found {len(json_files)} JSON files to process")
 
-        # Skip ONLY true metadata and non-vision-language annotation files
-        # KEEP all VQA/GQA data including test/challenge/submission sets
+        # Skip metadata files and non-VL datasets
         skip_patterns = [
-            'download_summary',  # Download metadata
-            'instances_',        # COCO object detection (not VL)
-            'person_keypoints_', # COCO pose estimation (not VL)
-            '__MACOSX',          # Mac OS metadata folder
+            'download_summary',     # Download metadata
+            'dataset_info',         # HuggingFace dataset metadata
+            'instances_',           # COCO object detection (not VL)
+            'person_keypoints_',    # COCO pose estimation (not VL)
+            '__MACOSX',             # Mac OS metadata folder
+            '.lock',                # Lock files
+            '_builder.lock',        # HF builder locks
+            '_incomplete',          # Incomplete downloads
         ]
 
         for json_file in json_files:
@@ -497,35 +602,45 @@ class AlignmentDataset(BaseVLMDataset):
                                             break
 
                 # ===== OCR-VQA Format =====
-                elif any('ocr' in str(k).lower() or 'text' in str(k).lower() for k in list(data.keys())[:10]):
-                    logger.info(f"Detected OCR-VQA or text-based format")
+                # Check if it's actually OCR-VQA data (has questions, not just metadata)
+                elif 'data' in data and isinstance(data['data'], list) and len(data['data']) > 0:
+                    # Verify first item has OCR-VQA structure
+                    first_item = data['data'][0] if isinstance(data['data'], list) else {}
+                    if 'question' in first_item or 'imageURL' in first_item:
+                        logger.info(f"Detected OCR-VQA format")
 
-                    # OCR-VQA typically has image_id, question, answer
-                    items = data.get('data', data.get('annotations', []))
-                    if isinstance(items, dict):
-                        items = list(items.values())
+                        items = data['data']
 
-                    for item in items[:50000]:  # Limit for memory
-                        question = item.get('question', item.get('text', ''))
-                        answer = item.get('answer', item.get('answers', [''])[0] if isinstance(item.get('answers'), list) else '')
-                        image_id = item.get('image_id', item.get('image', ''))
+                        for item in items[:50000]:  # Limit for memory
+                            if not isinstance(item, dict):
+                                continue
 
-                        if question and image_id:
-                            text = f"Question: {question} Answer: {answer}" if answer else f"Question: {question}"
+                            question = item.get('question', item.get('text', ''))
+                            answer = item.get('answer', '')
+                            if 'answers' in item:
+                                if isinstance(item['answers'], list) and len(item['answers']) > 0:
+                                    answer = item['answers'][0]
+                                elif isinstance(item['answers'], dict) and 'answer' in item['answers']:
+                                    answer = item['answers']['answer']
 
-                            # Try to find image
-                            if isinstance(image_id, str) and ('/' in image_id or '.' in image_id):
-                                image_path = image_id
-                            else:
-                                image_path = f"{image_id}.jpg"
+                            image_id = item.get('imageURL', item.get('image_id', item.get('image', '')))
 
-                            if not os.path.isabs(image_path):
-                                image_path = str(json_parent / image_path)
+                            if question and image_id:
+                                text = f"Question: {question} Answer: {answer}" if answer else f"Question: {question}"
 
-                            samples.append({
-                                'image': image_path,
-                                'caption': text,
-                            })
+                                # Try to find image
+                                if isinstance(image_id, str) and ('/' in image_id or '.' in image_id):
+                                    image_path = image_id
+                                else:
+                                    image_path = f"{image_id}.jpg"
+
+                                if not os.path.isabs(image_path):
+                                    image_path = str(json_parent / image_path)
+
+                                samples.append({
+                                    'image': image_path,
+                                    'caption': text,
+                                })
 
             added_count = len(samples) - before_count
             # Log how many samples were added from this file
@@ -545,8 +660,16 @@ class AlignmentDataset(BaseVLMDataset):
 
         logger.info(f"="*80)
         logger.info(f"FINAL DATASET: Loaded {len(samples):,} total samples for {self.split} split")
-        logger.info(f"Data sources: COCO (captions), VQA v2, OK-VQA, A-OKVQA, GQA (all splits),")
-        logger.info(f"              LLaVA-Instruct, RefCOCO/+/g, OCR-VQA, CC3M, LAION-COCO")
+        logger.info(f"Data sources:")
+        logger.info(f"  - COCO Captions (train2017, val2017)")
+        logger.info(f"  - VQA v2 (train2014, val2014)")
+        logger.info(f"  - OK-VQA")
+        logger.info(f"  - A-OKVQA")
+        logger.info(f"  - GQA (all splits: train, val, test, challenge, submission)")
+        logger.info(f"  - LLaVA Instruct (150k)")
+        logger.info(f"  - RefCOCO/RefCOCO+/RefCOCOg")
+        logger.info(f"  - OCR-VQA")
+        logger.info(f"  - CC3M (sampled up to 500k)")
         logger.info(f"="*80)
         return samples
 
