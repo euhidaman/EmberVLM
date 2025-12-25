@@ -362,6 +362,8 @@ def main():
                        help='Save checkpoint every N steps')
     parser.add_argument('--log_steps', type=int, default=50,
                        help='Log metrics every N steps')
+    parser.add_argument('--eval_steps', type=int, default=500,
+                       help='Evaluate every N steps')
 
     # Data paths
     parser.add_argument('--stage1_data', type=str, default='data/base_vlm',
