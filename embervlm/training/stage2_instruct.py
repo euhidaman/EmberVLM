@@ -145,12 +145,17 @@ class Stage2Trainer:
         # Set seed
         set_seed(config.seed, self.rank)
 
+        # Unwrap model if it was previously wrapped with DDP
+        from embervlm.training.train_utils import unwrap_model
+        model = unwrap_model(model)
+
         # Ensure model is on correct device before DDP
         try:
             model = model.to(self.device)
             torch.cuda.synchronize()  # Ensure CUDA operations complete
         except RuntimeError as e:
             logger.error(f"[Rank {self.rank}] Failed to move model to device: {e}")
+            raise
             raise
 
         # Synchronize to ensure all ranks have model loaded
@@ -421,6 +426,7 @@ class Stage2Trainer:
                     pixel_values=pixel_values,
                     attention_mask=attention_mask,
                     labels=labels,
+                    output_attentions=True,  # For visualization
                 )
 
                 loss = outputs['loss']
@@ -550,7 +556,9 @@ class Stage2Trainer:
                 if self.wandb_logger is not None:
                     self.wandb_logger.finish()
 
-            cleanup_distributed()
+            # Note: Do NOT call cleanup_distributed() here
+            # The process group should persist across stages
+            # cleanup_distributed() should only be called at the end of all training
 
 
 def run_stage2_training(

@@ -684,6 +684,7 @@ class TinyLLMBackbone(nn.Module):
         use_cache: bool = False,
         output_attentions: bool = False,
         output_hidden_states: bool = False,
+        **kwargs,  # Accept and ignore extra kwargs like return_dict
     ) -> Dict[str, torch.Tensor]:
         """Forward pass through the language model."""
         return self.model(
@@ -845,8 +846,10 @@ class PretrainedTinyLLMBackbone(nn.Module):
         use_cache: bool = False,
         output_attentions: bool = False,
         output_hidden_states: bool = False,
+        **kwargs,  # Accept and ignore extra kwargs like return_dict
     ) -> Dict[str, torch.Tensor]:
         """Forward pass through the language model."""
+        # Always request hidden states to get last_hidden_state
         outputs = self.model(
             input_ids=input_ids,
             inputs_embeds=inputs_embeds,
@@ -855,7 +858,7 @@ class PretrainedTinyLLMBackbone(nn.Module):
             past_key_values=past_key_values,
             use_cache=use_cache,
             output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
+            output_hidden_states=True,  # Always get hidden states for last_hidden_state
             return_dict=True,
         )
 
@@ -864,7 +867,7 @@ class PretrainedTinyLLMBackbone(nn.Module):
             'loss': outputs.loss,
             'logits': outputs.logits,
             'past_key_values': outputs.past_key_values,
-            'hidden_states': outputs.hidden_states,
+            'hidden_states': outputs.hidden_states if output_hidden_states else None,
             'attentions': outputs.attentions,
             'last_hidden_state': outputs.hidden_states[-1] if outputs.hidden_states else None,
         }

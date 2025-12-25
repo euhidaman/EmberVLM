@@ -415,13 +415,18 @@ class EmberVLM(nn.Module):
                 adjusted_labels = labels
 
         # Forward through language model
+        # Always get hidden states if reasoning is enabled and we need them
+        need_hidden_states = output_hidden_states or (
+            self.config.reasoning_enabled and (return_reasoning or robot_targets is not None)
+        )
+
         lm_outputs = self.language_model(
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
             labels=adjusted_labels,
             use_cache=use_cache,
             output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
+            output_hidden_states=need_hidden_states,
         )
 
         outputs = {

@@ -132,6 +132,7 @@ class TrainingVisualizer:
         buf.seek(0)
         pil_image = Image.open(buf).copy()
         buf.close()
+        plt.close(fig)
 
         return fig, pil_image
 
@@ -198,6 +199,7 @@ class TrainingVisualizer:
         buf.seek(0)
         pil_image = Image.open(buf).copy()
         buf.close()
+        plt.close(fig)
 
         return fig, pil_image
 
@@ -269,6 +271,7 @@ class TrainingVisualizer:
         buf.seek(0)
         pil_image = Image.open(buf).copy()
         buf.close()
+        plt.close(fig)
 
         return fig, pil_image
 
@@ -328,6 +331,7 @@ class TrainingVisualizer:
         buf.seek(0)
         pil_image = Image.open(buf).copy()
         buf.close()
+        plt.close(fig)
 
         return fig, pil_image
 

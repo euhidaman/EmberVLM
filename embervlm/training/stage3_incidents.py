@@ -62,6 +62,10 @@ class Stage3Trainer:
 
         set_seed(config.seed, self.rank)
 
+        # Unwrap model if it was previously wrapped with DDP
+        from embervlm.training.train_utils import unwrap_model
+        model = unwrap_model(model)
+
         # Ensure model is on correct device before DDP
         try:
             model = model.to(self.device)
@@ -298,7 +302,8 @@ class Stage3Trainer:
         avg_metrics = eval_metrics.get_average()
 
         if is_main_process():
-            self.wandb_logger.log(avg_metrics, step=self.global_step)
+            if self.wandb_logger is not None:
+                self.wandb_logger.log(avg_metrics, step=self.global_step)
             logger.info(f"Evaluation: {avg_metrics}")
 
         self.model.train()
@@ -362,7 +367,9 @@ class Stage3Trainer:
                 if self.wandb_logger is not None:
                     self.wandb_logger.finish()
 
-            cleanup_distributed()
+            # Note: Do NOT call cleanup_distributed() here
+            # The process group should persist across stages
+            # cleanup_distributed() should only be called at the end of all training
 
 
 def run_stage3_training(
