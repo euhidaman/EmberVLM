@@ -119,8 +119,8 @@ class AlignmentDataset(BaseVLMDataset):
 
         logger.info(f"Found {len(json_files)} JSON files to process")
 
-        # Skip certain files that are not data annotations
-        skip_patterns = ['download_summary', 'metadata', 'info', 'license']
+        # Skip certain files that are not data annotations or are non-VL tasks
+        skip_patterns = ['download_summary', 'metadata', 'info', 'license', 'instances', 'person_keypoints']
 
         for json_file in json_files:
             # Skip metadata files
@@ -261,21 +261,29 @@ class AlignmentDataset(BaseVLMDataset):
                                         break
 
                 # ===== GQA Format =====
-                elif any(key in data for key in list(data.keys())[:10]) and isinstance(list(data.values())[0], dict):
-                    # GQA is dict of dicts: {question_id: {question, answer, imageId, ...}}
-                    logger.info(f"Detected GQA format: {len(data)} questions")
+                elif isinstance(data, dict) and len(data) > 0:
+                    # Check if it's GQA format: dict of dicts with question/answer structure
+                    first_values = list(data.values())[:5]
+                    is_gqa = all(isinstance(v, dict) and any(k in v for k in ['question', 'answer', 'imageId']) for v in first_values if isinstance(v, dict))
 
-                    # Find GQA images directory
-                    image_dirs = []
-                    for search_dir in [json_parent, json_parent.parent]:
-                        for pattern in ['images', 'allImages']:
-                            found_dirs = list(search_dir.glob(pattern))
-                            image_dirs.extend(found_dirs)
+                    if is_gqa:
+                        # GQA is dict of dicts: {question_id: {question, answer, imageId, ...}}
+                        logger.info(f"Detected GQA format: {len(data)} questions")
 
-                    for qid, item in list(data.items())[:100000]:  # Limit for memory
-                        question = item.get('question', '')
-                        answer = item.get('answer', '')
-                        image_id = item.get('imageId', '')
+                        # Find GQA images directory
+                        image_dirs = []
+                        for search_dir in [json_parent, json_parent.parent]:
+                            for pattern in ['images', 'allImages']:
+                                found_dirs = list(search_dir.glob(pattern))
+                                image_dirs.extend(found_dirs)
+
+                        for qid, item in list(data.items())[:100000]:  # Limit for memory
+                            if not isinstance(item, dict):
+                                continue
+
+                            question = item.get('question', '')
+                            answer = item.get('answer', '')
+                            image_id = item.get('imageId', '')
 
                         if question and image_id:
                             text = f"Question: {question} Answer: {answer}" if answer else f"Question: {question}"
