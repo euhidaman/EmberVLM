@@ -62,13 +62,19 @@ class BaseVLMDataset(Dataset):
         """Load data samples. Override in subclasses."""
         raise NotImplementedError
 
-    def _load_image(self, image_path: str) -> torch.Tensor:
-        """Load and transform image."""
+    def _load_image(self, image_input) -> torch.Tensor:
+        """Load and transform image from path or PIL Image."""
         try:
-            if not os.path.isabs(image_path):
-                image_path = self.data_dir / image_path
+            # Check if input is already a PIL Image (e.g., from CC3M)
+            if isinstance(image_input, Image.Image):
+                image = image_input.convert('RGB')
+            else:
+                # It's a path string
+                image_path = image_input
+                if not os.path.isabs(image_path):
+                    image_path = self.data_dir / image_path
+                image = Image.open(image_path).convert('RGB')
 
-            image = Image.open(image_path).convert('RGB')
             return self.transform(image)
         except Exception as e:
             # Return black image on error
@@ -111,106 +117,98 @@ class AlignmentDataset(BaseVLMDataset):
     """Dataset for Stage 1 visual-language alignment - supports multiple dataset formats."""
 
     def _load_cc3m_arrow(self, logger) -> List[Dict[str, Any]]:
-        """Load CC3M data from Arrow files."""
-        if not ARROW_AVAILABLE:
-            logger.warning("pyarrow not available - skipping CC3M Arrow files")
-            return []
-
+        """Load CC3M data from HuggingFace dataset format."""
         samples = []
-        cc3m_dir = self.data_dir / 'cc3m' / 'dataset' / 'pixparse___cc3m-wds'
+        cc3m_cache_dir = self.data_dir / 'cc3m' / 'dataset'
 
-        if not cc3m_dir.exists():
-            logger.debug("CC3M Arrow directory not found")
+        if not cc3m_cache_dir.exists():
+            logger.debug("CC3M dataset directory not found")
             return samples
 
-        # Find all arrow files
-        arrow_files = list(cc3m_dir.rglob('*.arrow'))
+        try:
+            # Try to load using HuggingFace datasets library
+            from datasets import load_from_disk, load_dataset
 
-        if not arrow_files:
-            logger.debug("No CC3M Arrow files found")
-            return samples
+            logger.info("Loading CC3M dataset from HuggingFace format...")
 
-        logger.info(f"Loading CC3M from {len(arrow_files)} Arrow files...")
+            # Limit to 500K samples for CC3M to avoid OOM
+            samples_limit = 500000
 
-        # Limit to 500K samples for CC3M to avoid OOM
-        samples_limit = 500000
-        samples_per_file = max(1, samples_limit // len(arrow_files))
-
-        # CC3M images directory (if images were downloaded)
-        cc3m_images_dir = self.data_dir / 'cc3m' / 'images'
-
-        for arrow_file in arrow_files:
+            # Try to load from disk cache first
+            dataset = None
             try:
-                # Open Arrow file
-                with pa.memory_map(str(arrow_file), 'r') as source:
-                    table = pa.ipc.open_file(source).read_all()
+                dataset = load_dataset(
+                    "pixparse/cc3m-wds",
+                    cache_dir=str(cc3m_cache_dir),
+                    split='train'
+                )
+            except Exception as e:
+                logger.debug(f"Could not load from HF cache: {e}")
+                return samples
 
-                # Convert to dict for faster access
-                data_dict = table.to_pydict()
+            if dataset is None:
+                logger.debug("CC3M dataset not found in cache")
+                return samples
 
-                # Sample from this file
-                num_rows = table.num_rows
-                num_samples = min(num_rows, samples_per_file)
+            # Get total samples
+            total_samples = len(dataset)
+            logger.info(f"Found {total_samples:,} samples in CC3M dataset")
 
-                # Get indices to sample
-                if num_samples < num_rows:
-                    import numpy as np
-                    indices = np.random.choice(num_rows, num_samples, replace=False)
-                else:
-                    indices = range(num_rows)
+            # Sample indices
+            import numpy as np
+            if total_samples > samples_limit:
+                indices = np.random.choice(total_samples, samples_limit, replace=False)
+            else:
+                indices = range(total_samples)
 
-                # Extract caption and image
-                for idx in indices:
+            # Extract caption and image
+            for idx in indices:
+                try:
+                    item = dataset[int(idx)]
                     caption = None
-                    image_path = None
+                    image = None
 
                     # Try different column names for caption
-                    if 'caption' in data_dict:
-                        caption = str(data_dict['caption'][idx])
-                    elif 'text' in data_dict:
-                        caption = str(data_dict['text'][idx])
+                    if 'caption' in item:
+                        caption = str(item['caption'])
+                    elif 'text' in item:
+                        caption = str(item['text'])
+                    elif 'txt' in item:
+                        caption = str(item['txt'])
 
                     # Try different column names for image
-                    if 'jpg' in data_dict:  # CC3M WDS format stores image in 'jpg' column
-                        # Image stored as bytes - save key and we'll load from bytes in __getitem__
-                        image_bytes = data_dict['jpg'][idx]
-                        if image_bytes:
-                            # For now, store placeholder - actual loading will happen in __getitem__
-                            # We'll need to handle bytes differently
-                            image_path = f"cc3m_bytes_{len(samples)}"
-                    elif 'image' in data_dict:
-                        image_data = data_dict['image'][idx]
-                        if isinstance(image_data, (str, bytes)):
-                            image_path = str(image_data)
-                    elif 'url' in data_dict:
-                        # Image URL - check if local file exists
-                        image_url = str(data_dict['url'][idx])
-                        # Extract filename from URL
-                        filename = image_url.split('/')[-1]
-                        local_path = cc3m_images_dir / filename
-                        if local_path.exists():
-                            image_path = str(local_path)
+                    if 'image' in item:
+                        # HuggingFace stores PIL images directly
+                        image = item['image']  # This is a PIL Image object
+                    elif 'jpg' in item:
+                        # Image stored as bytes - convert to PIL
+                        import io
+                        from PIL import Image
+                        image_bytes = item['jpg']
+                        image = Image.open(io.BytesIO(image_bytes))
 
-                    if caption and image_path:
+                    if caption and image is not None:
                         samples.append({
-                            'image': image_path,
+                            'image': image,  # Store PIL Image directly
                             'caption': caption,
                         })
 
                     if len(samples) >= samples_limit:
                         break
 
-                if len(samples) >= samples_limit:
-                    break
+                except Exception as e:
+                    # Skip failed samples
+                    continue
 
-            except Exception as e:
-                logger.warning(f"Failed to load Arrow file {arrow_file.name}: {e}")
-                continue
+            if samples:
+                logger.info(f"✓ Loaded {len(samples):,} samples from CC3M dataset")
+            else:
+                logger.warning("✗ No samples loaded from CC3M dataset")
 
-        if samples:
-            logger.info(f"✓ Loaded {len(samples):,} samples from CC3M Arrow files")
-        else:
-            logger.warning("✗ No samples loaded from CC3M Arrow files")
+        except ImportError:
+            logger.warning("HuggingFace datasets library not available - skipping CC3M")
+        except Exception as e:
+            logger.warning(f"Failed to load CC3M dataset: {e}")
 
         return samples
 
