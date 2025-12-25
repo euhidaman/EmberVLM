@@ -210,6 +210,7 @@ class Stage2Trainer:
                     project="embervlm",
                     name="stage2_instruct",
                     config=config.to_dict(),
+                    output_dir=str(Path(config.output_dir) / 'visualizations'),
                 )
                 logger.info("Enhanced W&B logger initialized with visualizations")
             except Exception as e:

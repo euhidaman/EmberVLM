@@ -119,6 +119,7 @@ class Stage3Trainer:
                     project="embervlm",
                     name="stage3_robot_selection",
                     config=config.to_dict(),
+                    output_dir=str(Path(config.output_dir) / 'visualizations'),
                 )
                 logger.info("Enhanced W&B logger initialized with visualizations")
             except Exception as e:

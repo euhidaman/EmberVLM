@@ -451,19 +451,21 @@ class EnhancedWandbLogger(WandbLogger):
 
         # Initialize visualizer with error handling
         self.visualizer = None
+        output_dir = kwargs.get('output_dir', './outputs/visualizations')
+
         try:
             from embervlm.monitoring.visualization import TrainingVisualizer
-            logger.info("Initializing visualizer...")
-            self.visualizer = TrainingVisualizer(
-                output_dir=kwargs.get('output_dir', './outputs/visualizations')
-            )
-            logger.info("Visualizer initialized successfully")
+            logger.info(f"Initializing TrainingVisualizer with output_dir: {output_dir}")
+            self.visualizer = TrainingVisualizer(output_dir=output_dir)
+            logger.info(f"✓ TrainingVisualizer initialized successfully! Visualizations will be saved to: {output_dir}")
         except Exception as e:
-            logger.warning(f"Failed to initialize visualizer: {e}. Visualizations will be disabled.")
+            logger.error(f"✗ Failed to initialize TrainingVisualizer: {e}", exc_info=True)
+            logger.warning("Visualizations will be disabled. Only basic metrics will be logged.")
             self.visualizer = None
 
         # Track metrics history for plotting
         self.metrics_history = {}
+        logger.info(f"EnhancedWandbLogger initialized. Visualizer available: {self.visualizer is not None}")
 
     def log_with_visualization(
         self,
@@ -492,8 +494,11 @@ class EnhancedWandbLogger(WandbLogger):
         self.log(metrics, step=step, commit=False)
 
         # Generate visualizations periodically (only if visualizer is available)
-        if self.visualizer and step and step % 500 == 0 and len(self.metrics_history.get('loss', [])) > 100:
+        # Require at least 10 samples (10 * 50 steps = 500 steps minimum)
+        if self.visualizer and step and step % 500 == 0 and len(self.metrics_history.get('loss', [])) >= 10:
             try:
+                logger.info(f"Generating visualizations at step {step} with {len(self.metrics_history.get('loss', []))} loss samples")
+
                 # Loss decomposition plot
                 _, loss_img = self.visualizer.plot_loss_decomposition(
                     self.metrics_history,
@@ -501,6 +506,7 @@ class EnhancedWandbLogger(WandbLogger):
                     save_path=str(self.visualizer.output_dir / f"loss_decomp_step{step}.png")
                 )
                 self.log_image(f"{stage_name}/loss_decomposition", loss_img, step=step)
+                logger.info(f"Logged loss decomposition to W&B")
 
                 # Convergence analysis
                 _, conv_img = self.visualizer.plot_convergence_analysis(
@@ -509,9 +515,10 @@ class EnhancedWandbLogger(WandbLogger):
                     save_path=str(self.visualizer.output_dir / f"convergence_step{step}.png")
                 )
                 self.log_image(f"{stage_name}/convergence_analysis", conv_img, step=step)
+                logger.info(f"Logged convergence analysis to W&B")
 
             except Exception as e:
-                logger.warning(f"Failed to generate visualization: {e}")
+                logger.error(f"Failed to generate visualization: {e}", exc_info=True)
 
         if commit:
             self.wandb.log({}, commit=True)
