@@ -362,7 +362,6 @@ class Stage3Trainer:
                         x_label="Robot Type",
                         y_label="Accuracy",
                         step=self.global_step,
-                    )
                         stage_name="stage3",
                     )
 
