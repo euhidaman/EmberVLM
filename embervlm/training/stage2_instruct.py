@@ -421,7 +421,6 @@ class Stage2Trainer:
                     pixel_values=pixel_values,
                     attention_mask=attention_mask,
                     labels=labels,
-                    return_dict=True,
                 )
 
                 loss = outputs['loss']
