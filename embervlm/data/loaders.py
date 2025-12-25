@@ -130,114 +130,110 @@ class BaseVLMDataset(Dataset):
 class AlignmentDataset(BaseVLMDataset):
     """Dataset for Stage 1 visual-language alignment - supports multiple dataset formats."""
 
-    def _load_cc3m_arrow(self, logger) -> List[Dict[str, Any]]:
-        """Load CC3M data from Arrow files."""
+    def _load_cc3m_hf(self, logger) -> List[Dict[str, Any]]:
+        """Load CC3M data using HuggingFace datasets library."""
         samples = []
 
-        # CC3M Arrow files are stored directly in data/base_vlm/cc3m/ directory
+        # CC3M is stored in HuggingFace WebDataset format
         cc3m_dir = self.data_dir / 'cc3m'
 
         if not cc3m_dir.exists():
             logger.debug("CC3M directory not found")
             return samples
 
-        if not ARROW_AVAILABLE or not PANDAS_AVAILABLE:
-            logger.warning("PyArrow or Pandas not available - skipping CC3M")
-            return samples
-
         try:
-            # Find all Arrow files directly in cc3m directory
-            arrow_files = sorted(cc3m_dir.glob('cc3m-wds-train-*.arrow'))
-
-            if not arrow_files:
-                logger.debug("No CC3M Arrow files found")
+            # Try to import datasets library
+            try:
+                from datasets import load_dataset
+            except ImportError:
+                logger.warning("HuggingFace datasets library not available - skipping CC3M. Install with: pip install datasets")
                 return samples
 
-            logger.info(f"Loading CC3M from {len(arrow_files)} Arrow files...")
+            logger.info("Loading CC3M dataset from HuggingFace format...")
 
-            # Limit total samples to avoid OOM - CC3M is huge
-            samples_limit = 500000
-            samples_per_file = max(1000, samples_limit // len(arrow_files))
+            # Load using HuggingFace datasets with the local cache
+            # The dataset is already downloaded to cc3m_dir
+            try:
+                dataset = load_dataset(
+                    "pixparse/cc3m-wds",
+                    cache_dir=str(cc3m_dir),
+                    split="train",
+                    trust_remote_code=True
+                )
 
-            failed_files = 0
-            loaded_files = 0
+                logger.info(f"Found {len(dataset):,} samples in CC3M dataset")
 
-            for arrow_file in arrow_files:
-                if len(samples) >= samples_limit:
-                    break
+                # Limit to avoid OOM - sample 500k from the ~3M dataset
+                samples_limit = 500000
 
-                try:
-                    # Read Arrow file
-                    table = pa.ipc.open_file(str(arrow_file)).read_all()
-                    df = table.to_pandas()
+                # Sample indices uniformly across the dataset
+                if len(dataset) > samples_limit:
+                    import numpy as np
+                    indices = np.linspace(0, len(dataset) - 1, samples_limit, dtype=int)
+                    dataset = dataset.select(indices)
+                    logger.info(f"Sampled {samples_limit:,} from CC3M dataset")
 
-                    # Limit samples from this file
-                    file_samples = min(len(df), samples_per_file, samples_limit - len(samples))
+                # Process samples with progress tracking
+                successful = 0
+                failed = 0
 
-                    for idx in range(file_samples):
-                        try:
-                            row = df.iloc[idx]
+                for i, item in enumerate(dataset):
+                    try:
+                        # Extract image - CC3M stores as PIL Image in 'jpg' field
+                        image = item.get('jpg') or item.get('image')
 
-                            # Extract caption
-                            caption = None
-                            for col in ['caption', 'text', 'txt']:
-                                if col in df.columns and pd.notna(row[col]):
-                                    caption = str(row[col]).strip()
-                                    break
+                        # Extract caption
+                        caption = item.get('txt') or item.get('caption') or item.get('text', '')
 
-                            if not caption:
-                                continue
-
-                            # Extract image - CC3M uses 'jpg' column with bytes
-                            image = None
-                            if 'jpg' in df.columns and row['jpg'] is not None:
-                                import io
-                                try:
-                                    image_bytes = row['jpg']
-                                    if isinstance(image_bytes, bytes) and len(image_bytes) > 0:
-                                        image = Image.open(io.BytesIO(image_bytes))
-                                        if image.mode != 'RGB':
-                                            image = image.convert('RGB')
-                                        image.load()  # Force load to verify
-                                except Exception as img_err:
-                                    logger.debug(f"Failed to decode image: {img_err}")
-                                    continue
-                            elif 'image' in df.columns and row['image'] is not None:
-                                # Already a PIL image
-                                try:
-                                    image = row['image']
-                                    if not isinstance(image, Image.Image):
-                                        continue
-                                    if image.mode != 'RGB':
-                                        image = image.convert('RGB')
-                                    image.load()
-                                except:
-                                    continue
-
-                            if caption and image is not None:
-                                samples.append({
-                                    'image': image,
-                                    'caption': caption,
-                                })
-
-                            if len(samples) >= samples_limit:
-                                break
-
-                        except Exception as e:
-                            logger.debug(f"Failed to process row {idx}: {e}")
+                        if image is None or not caption:
+                            failed += 1
                             continue
 
-                    loaded_files += 1
+                        # Ensure image is PIL Image and in RGB mode
+                        if not isinstance(image, Image.Image):
+                            # Try to decode if it's bytes
+                            if isinstance(image, bytes):
+                                import io
+                                image = Image.open(io.BytesIO(image))
+                            else:
+                                failed += 1
+                                continue
 
-                except Exception as e:
-                    logger.debug(f"Failed to load {arrow_file.name}: {e}")
-                    failed_files += 1
-                    continue
+                        # Convert to RGB and verify
+                        if image.mode != 'RGB':
+                            image = image.convert('RGB')
+                        image.load()  # Force load to verify image is valid
 
-            if samples:
-                logger.info(f"✓ Loaded {len(samples):,} samples from CC3M ({loaded_files} files)")
-            else:
-                logger.warning(f"✗ No samples loaded from CC3M (failed: {failed_files}/{len(arrow_files)} files)")
+                        caption = str(caption).strip()
+                        if not caption:
+                            failed += 1
+                            continue
+
+                        samples.append({
+                            'image': image,
+                            'caption': caption,
+                        })
+                        successful += 1
+
+                        # Log progress every 50k samples
+                        if successful > 0 and successful % 50000 == 0:
+                            logger.info(f"  Loaded {successful:,} CC3M samples so far...")
+
+                    except Exception as e:
+                        failed += 1
+                        if failed <= 10:  # Only log first 10 failures
+                            logger.debug(f"Failed to process CC3M sample {i}: {e}")
+                        continue
+
+                if samples:
+                    logger.info(f"✓ Loaded {len(samples):,} samples from CC3M (successful: {successful:,}, failed: {failed:,})")
+                else:
+                    logger.warning(f"✗ No samples loaded from CC3M dataset (failed: {failed:,})")
+
+            except Exception as e:
+                logger.warning(f"Failed to load CC3M with load_dataset: {e}")
+                logger.info("CC3M dataset should be downloaded to data/base_vlm/cc3m/")
+                return samples
 
         except Exception as e:
             logger.warning(f"Failed to load CC3M dataset: {e}")
@@ -348,8 +344,8 @@ class AlignmentDataset(BaseVLMDataset):
 
         samples = []
 
-        # Load CC3M from Arrow files
-        cc3m_samples = self._load_cc3m_arrow(logger)
+        # Load CC3M from HuggingFace format
+        cc3m_samples = self._load_cc3m_hf(logger)
         samples.extend(cc3m_samples)
 
         # Load RefCOCO variants from Arrow files
@@ -704,16 +700,8 @@ class AlignmentDataset(BaseVLMDataset):
 
         logger.info(f"="*80)
         logger.info(f"FINAL DATASET: Loaded {len(samples):,} total samples for {self.split} split")
-        logger.info(f"Data sources:")
-        logger.info(f"  - COCO Captions (train2017, val2017)")
-        logger.info(f"  - VQA v2 (train2014, val2014)")
-        logger.info(f"  - OK-VQA")
-        logger.info(f"  - A-OKVQA")
-        logger.info(f"  - GQA (all splits: train, val, test, challenge, submission)")
-        logger.info(f"  - LLaVA Instruct (150k)")
-        logger.info(f"  - RefCOCO/RefCOCO+/RefCOCOg")
-        logger.info(f"  - OCR-VQA")
-        logger.info(f"  - CC3M (sampled up to 500k)")
+        logger.info(f"Data sources: COCO (captions), VQA v2, OK-VQA, A-OKVQA, GQA (all splits),")
+        logger.info(f"              LLaVA-Instruct, RefCOCO/+/g, OCR-VQA, CC3M, LAION-COCO")
         logger.info(f"="*80)
         return samples
 
