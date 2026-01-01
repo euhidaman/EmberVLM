@@ -6,11 +6,14 @@ Orchestrates all four training stages:
 2. Multimodal Instruction Tuning
 3. Robot Fleet Selection Training
 4. Chain-of-Thought Reasoning Integration
+
+MEMORY SAFE: Implements safeguards for distributed training on shared servers.
 """
 
 import os
 import argparse
 import logging
+import gc
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -31,6 +34,11 @@ from embervlm.training.stage3_incidents import run_stage3_training
 from embervlm.training.stage4_reasoning import run_stage4_training
 from embervlm.monitoring.wandb_logger import WandbLogger
 from embervlm.monitoring.carbon_tracker import CarbonTracker
+
+# Set environment variables for memory safety BEFORE any CUDA operations
+os.environ.setdefault('OMP_NUM_THREADS', '1')  # Prevent OpenMP thread explosion
+os.environ.setdefault('MKL_NUM_THREADS', '1')  # Prevent MKL thread explosion
+os.environ.setdefault('TOKENIZERS_PARALLELISM', 'false')  # Prevent tokenizer warnings
 
 logging.basicConfig(
     level=logging.INFO,
@@ -154,12 +162,24 @@ def run_all_stages(args: argparse.Namespace):
         hub_model_id=args.hub_model_id,
     )
 
-    # Carbon tracking
-    carbon_tracker = CarbonTracker(
-        output_dir=str(output_dir / 'emissions'),
-        project_name="EmberVLM",
-    )
-    carbon_tracker.start()
+    # Carbon tracking - ONLY on rank 0 to prevent duplicate tracking
+    carbon_tracker = None
+    if rank == 0:
+        try:
+            carbon_tracker = CarbonTracker(
+                output_dir=str(output_dir / 'emissions'),
+                project_name="EmberVLM",
+            )
+            carbon_tracker.start()
+            logger.info("Carbon tracking started (rank 0 only)")
+        except Exception as e:
+            logger.warning(f"Failed to initialize carbon tracker: {e}")
+
+    # Synchronize before training starts
+    if args.distributed:
+        import torch.distributed as dist
+        if dist.is_initialized():
+            dist.barrier()
 
     try:
         # Stage 1: Visual-Language Alignment
@@ -320,9 +340,13 @@ def run_all_stages(args: argparse.Namespace):
         logger.info(f"Final model saved to {final_output}")
 
     finally:
-        # Stop carbon tracking
-        total_emissions = carbon_tracker.stop()
-        logger.info(f"Total training emissions: {total_emissions:.4f} kg CO2eq")
+        # Stop carbon tracking (only rank 0 has a tracker)
+        if carbon_tracker is not None:
+            try:
+                total_emissions = carbon_tracker.stop()
+                logger.info(f"Total training emissions: {total_emissions:.4f} kg CO2eq")
+            except Exception as e:
+                logger.warning(f"Error stopping carbon tracker: {e}")
 
         # Cleanup distributed training
         if args.distributed:
