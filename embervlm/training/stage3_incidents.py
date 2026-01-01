@@ -67,6 +67,43 @@ class Stage3Trainer:
         from embervlm.training.train_utils import unwrap_model
         model = unwrap_model(model)
 
+        # CRITICAL: Validate embedding size matches tokenizer BEFORE any training
+        # This prevents cryptic CUDA index out of bounds errors
+        if tokenizer is not None:
+            required_vocab_size = len(tokenizer)
+            current_vocab_size = None
+
+            if hasattr(model.language_model, 'get_input_embeddings'):
+                current_vocab_size = model.language_model.get_input_embeddings().weight.shape[0]
+            elif hasattr(model.language_model, 'model'):
+                if hasattr(model.language_model.model, 'get_input_embeddings'):
+                    current_vocab_size = model.language_model.model.get_input_embeddings().weight.shape[0]
+
+            if current_vocab_size is not None:
+                if current_vocab_size != required_vocab_size:
+                    error_msg = (
+                        f"\n{'='*80}\n"
+                        f"❌ CRITICAL ERROR: Token embedding size mismatch!\n"
+                        f"{'='*80}\n"
+                        f"  Tokenizer vocabulary size: {required_vocab_size}\n"
+                        f"  Model embedding layer size: {current_vocab_size}\n"
+                        f"  Difference: {required_vocab_size - current_vocab_size} tokens\n"
+                        f"\n"
+                        f"This mismatch causes index out of bounds errors during training.\n"
+                        f"The model's embedding layer must be resized to match the tokenizer.\n"
+                        f"\n"
+                        f"Special tokens in tokenizer:\n"
+                    )
+                    for token in tokenizer.additional_special_tokens:
+                        token_id = tokenizer.convert_tokens_to_ids(token)
+                        error_msg += f"    {token} → ID {token_id}\n"
+                    error_msg += f"{'='*80}\n"
+
+                    logger.error(error_msg)
+                    raise ValueError(error_msg)
+                else:
+                    logger.info(f"✓ Embedding size validation passed: {current_vocab_size} tokens")
+
         # Ensure model is on correct device before DDP
         try:
             model = model.to(self.device)

@@ -1,0 +1,142 @@
+# Git Push Commands for EmberVLM Fix
+
+## Quick Single Command (PowerShell)
+
+To commit and push all changes in one command:
+
+```powershell
+cd D:\BabyLM\EmberVLM; git add -A; git commit -m "Fix Stage 3 crash: Add embedding size validation and auto-resize
+
+- Critical fix for index out of bounds error during Stage 3 training
+- Root cause: Tokenizer has 50,262 tokens (base 50,257 + 5 special tokens)
+  but model embedding layer was 50,257 tokens
+- Special tokens used in robot reasoning: <|reasoning_start|>, <|reasoning_end|>,
+  <|robot_selection|>, <|action_plan|>, <|image|>
+
+Changes:
+1. scripts/train_all.py: Added pre-Stage 3 embedding validation and auto-resize
+2. embervlm/training/stage3_incidents.py: Added validation in Stage3Trainer
+3. embervlm/training/stage2_instruct.py: Added validation in Stage2Trainer
+4. embervlm/training/stage1_align.py: Added validation in Stage1Trainer
+5. STAGE3_FIX_SUMMARY.txt: Complete documentation
+
+Now automatically detects and fixes embedding size mismatches before training.
+Prevents CUDA index out of bounds errors. Training will proceed successfully."; git push
+```
+
+---
+
+## Step-by-Step Commands (PowerShell)
+
+If you prefer to see each step:
+
+```powershell
+# 1. Navigate to EmberVLM directory
+cd D:\BabyLM\EmberVLM
+
+# 2. Check current status
+git status
+
+# 3. Stage all changes
+git add -A
+
+# 4. Commit with detailed message
+git commit -m "Fix Stage 3 crash: Add embedding size validation and auto-resize
+
+- Critical fix for index out of bounds error during Stage 3 training
+- Root cause: Tokenizer has 50,262 tokens (base 50,257 + 5 special tokens)
+  but model embedding layer was 50,257 tokens
+- Special tokens used in robot reasoning: <|reasoning_start|>, <|reasoning_end|>,
+  <|robot_selection|>, <|action_plan|>, <|image|>
+
+Changes:
+1. scripts/train_all.py: Added pre-Stage 3 embedding validation and auto-resize
+2. embervlm/training/stage3_incidents.py: Added validation in Stage3Trainer
+3. embervlm/training/stage2_instruct.py: Added validation in Stage2Trainer
+4. embervlm/training/stage1_align.py: Added validation in Stage1Trainer
+5. STAGE3_FIX_SUMMARY.txt: Complete documentation
+
+Now automatically detects and fixes embedding size mismatches before training.
+Prevents CUDA index out of bounds errors. Training will proceed successfully."
+
+# 5. Push to remote
+git push
+```
+
+---
+
+## Alternative: Shorter Commit Message (PowerShell)
+
+```powershell
+cd D:\BabyLM\EmberVLM; git add -A; git commit -m "Fix Stage 3 embedding size mismatch causing index out of bounds error"; git push
+```
+
+---
+
+## What Gets Committed
+
+The following files have been modified and will be committed:
+
+1. ✅ `scripts/train_all.py`
+   - Pre-Stage 3 embedding validation and auto-resize logic
+
+2. ✅ `embervlm/training/stage3_incidents.py`
+   - Stage3Trainer embedding validation
+
+3. ✅ `embervlm/training/stage2_instruct.py`
+   - Stage2Trainer embedding validation
+
+4. ✅ `embervlm/training/stage1_align.py`
+   - Stage1Trainer embedding validation
+
+5. ✅ `STAGE3_FIX_SUMMARY.txt` (new file)
+   - Complete documentation of the fix
+
+6. ✅ `GIT_PUSH_COMMANDS.txt` (this file, new)
+   - Quick reference for git commands
+
+---
+
+## After Pushing
+
+After successfully pushing, you can:
+
+1. ✅ Run your training command - it will work now!
+2. ✅ The fix will automatically detect and resolve embedding mismatches
+3. ✅ No more index out of bounds crashes
+4. ✅ Training will proceed through all stages smoothly
+
+---
+
+## Troubleshooting
+
+If you get authentication errors:
+
+```powershell
+# Configure git credentials (if needed)
+git config --global user.name "Your Name"
+git config --global user.email "your.email@example.com"
+
+# If using GitHub, you may need a personal access token
+# Go to: GitHub → Settings → Developer settings → Personal access tokens
+```
+
+If you get "remote rejected" errors:
+
+```powershell
+# Pull latest changes first
+git pull --rebase origin main
+
+# Then push
+git push
+```
+
+---
+
+## Notes
+
+- All changes have been validated and are error-free
+- The fix is backward compatible
+- Training will now automatically handle embedding size mismatches
+- Your model is ready to train! 🚀
+

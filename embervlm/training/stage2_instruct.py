@@ -149,13 +149,30 @@ class Stage2Trainer:
         from embervlm.training.train_utils import unwrap_model
         model = unwrap_model(model)
 
+        # Validate embedding size matches tokenizer
+        if tokenizer is not None:
+            required_vocab_size = len(tokenizer)
+            current_vocab_size = None
+
+            if hasattr(model.language_model, 'get_input_embeddings'):
+                current_vocab_size = model.language_model.get_input_embeddings().weight.shape[0]
+            elif hasattr(model.language_model, 'model'):
+                if hasattr(model.language_model.model, 'get_input_embeddings'):
+                    current_vocab_size = model.language_model.model.get_input_embeddings().weight.shape[0]
+
+            if current_vocab_size is not None:
+                if current_vocab_size != required_vocab_size:
+                    logger.error(f"❌ Token embedding size mismatch! Tokenizer: {required_vocab_size}, Model: {current_vocab_size}")
+                    raise ValueError(f"Embedding size ({current_vocab_size}) doesn't match tokenizer ({required_vocab_size})")
+                else:
+                    logger.info(f"✓ Embedding size validation passed: {current_vocab_size} tokens")
+
         # Ensure model is on correct device before DDP
         try:
             model = model.to(self.device)
             torch.cuda.synchronize()  # Ensure CUDA operations complete
         except RuntimeError as e:
             logger.error(f"[Rank {self.rank}] Failed to move model to device: {e}")
-            raise
             raise
 
         # Synchronize to ensure all ranks have model loaded

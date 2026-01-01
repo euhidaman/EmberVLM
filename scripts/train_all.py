@@ -261,6 +261,56 @@ def run_all_stages(args: argparse.Namespace):
             logger.info("Stage 3: Robot Fleet Selection Training")
             logger.info("="*60)
 
+            # CRITICAL FIX: Verify embedding layer size matches tokenizer BEFORE Stage 3
+            # This prevents index out of bounds errors when special tokens are used
+            from embervlm.training.train_utils import unwrap_model
+            model_unwrapped = unwrap_model(model)
+
+            # Check embedding size vs tokenizer size
+            current_vocab_size = None
+            if hasattr(model_unwrapped.language_model, 'get_input_embeddings'):
+                current_vocab_size = model_unwrapped.language_model.get_input_embeddings().weight.shape[0]
+            elif hasattr(model_unwrapped.language_model, 'model'):
+                if hasattr(model_unwrapped.language_model.model, 'get_input_embeddings'):
+                    current_vocab_size = model_unwrapped.language_model.model.get_input_embeddings().weight.shape[0]
+
+            required_vocab_size = len(tokenizer)
+
+            if current_vocab_size is not None and current_vocab_size != required_vocab_size:
+                logger.warning(f"⚠️ CRITICAL: Embedding size mismatch detected!")
+                logger.warning(f"   Current embedding size: {current_vocab_size}")
+                logger.warning(f"   Required (tokenizer size): {required_vocab_size}")
+                logger.warning(f"   Special tokens in use: {tokenizer.additional_special_tokens}")
+                logger.info(f"🔧 Resizing embeddings to match tokenizer...")
+
+                # Resize embeddings to match tokenizer
+                if hasattr(model_unwrapped.language_model, 'resize_token_embeddings'):
+                    model_unwrapped.language_model.resize_token_embeddings(required_vocab_size)
+                    logger.info(f"✓ Resized embeddings via resize_token_embeddings()")
+                elif hasattr(model_unwrapped.language_model, 'model'):
+                    if hasattr(model_unwrapped.language_model.model, 'resize_token_embeddings'):
+                        model_unwrapped.language_model.model.resize_token_embeddings(required_vocab_size)
+                        logger.info(f"✓ Resized embeddings via model.resize_token_embeddings()")
+
+                # Verify resize worked
+                new_vocab_size = None
+                if hasattr(model_unwrapped.language_model, 'get_input_embeddings'):
+                    new_vocab_size = model_unwrapped.language_model.get_input_embeddings().weight.shape[0]
+                elif hasattr(model_unwrapped.language_model, 'model'):
+                    if hasattr(model_unwrapped.language_model.model, 'get_input_embeddings'):
+                        new_vocab_size = model_unwrapped.language_model.model.get_input_embeddings().weight.shape[0]
+
+                if new_vocab_size == required_vocab_size:
+                    logger.info(f"✅ Embedding resize successful: {new_vocab_size} tokens")
+                else:
+                    logger.error(f"❌ Embedding resize FAILED! Size is {new_vocab_size}, expected {required_vocab_size}")
+                    raise RuntimeError(f"Failed to resize embeddings to match tokenizer vocabulary")
+            else:
+                logger.info(f"✓ Embedding size matches tokenizer: {required_vocab_size} tokens")
+
+            # Use the unwrapped model for Stage 3
+            model = model_unwrapped
+
             stage3_dict = training_config.to_dict()
             stage3_dict.update({
                 'output_dir': str(output_dir / 'stage3'),
