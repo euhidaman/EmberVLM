@@ -537,6 +537,25 @@ class EnhancedRobotSelectionDataset(Dataset):
         input_ids = encoding['input_ids'].squeeze(0)
         attention_mask = encoding['attention_mask'].squeeze(0)
 
+        # CRITICAL FIX: Validate and clamp token IDs to prevent CUDA index errors
+        # This catches cases where tokenizer produces out-of-bounds IDs
+        vocab_size = len(self.tokenizer)
+        max_token_id = input_ids.max().item()
+
+        if max_token_id >= vocab_size:
+            logger.warning(
+                f"⚠️ Token ID out of bounds detected! Max ID: {max_token_id}, Vocab size: {vocab_size}. "
+                f"Clamping to valid range. Sample idx: {idx}"
+            )
+            # Clamp to valid range (use pad token for out-of-bounds)
+            input_ids = torch.clamp(input_ids, max=vocab_size - 1)
+
+        # Also check for negative token IDs (shouldn't happen but be safe)
+        min_token_id = input_ids.min().item()
+        if min_token_id < 0 and min_token_id != -100:  # -100 is ignore index
+            logger.warning(f"⚠️ Negative token ID detected! Min ID: {min_token_id}. Clamping to 0.")
+            input_ids = torch.clamp(input_ids, min=0)
+
         # Labels for language modeling
         labels = input_ids.clone()
         labels[labels == self.tokenizer.pad_token_id] = -100

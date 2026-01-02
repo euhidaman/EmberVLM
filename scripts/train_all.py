@@ -135,17 +135,50 @@ def run_all_stages(args: argparse.Namespace):
     logger.info("Loading pretrained language model from tinyllm/30M-0.4...")
     model = create_model()
 
-    # Resize embeddings for special tokens
-    # Handle both PretrainedTinyLLMBackbone and TinyLLMBackbone
+    # Resize embeddings for special tokens - MUST happen before any DDP wrapping
+    # This ensures all ranks have the same embedding size
+    target_vocab_size = len(tokenizer)
+    logger.info(f"Target vocabulary size (with special tokens): {target_vocab_size}")
+
+    # Resize embeddings
     if hasattr(model.language_model, 'resize_token_embeddings'):
-        # PretrainedTinyLLMBackbone has this method
-        model.language_model.resize_token_embeddings(len(tokenizer))
-        logger.info(f"Resized token embeddings to {len(tokenizer)}")
+        model.language_model.resize_token_embeddings(target_vocab_size)
+        logger.info(f"Resized token embeddings to {target_vocab_size}")
     elif hasattr(model.language_model, 'model'):
-        # TinyLLMBackbone wraps model
         if hasattr(model.language_model.model, 'resize_token_embeddings'):
-            model.language_model.model.resize_token_embeddings(len(tokenizer))
-            logger.info(f"Resized token embeddings to {len(tokenizer)}")
+            model.language_model.model.resize_token_embeddings(target_vocab_size)
+            logger.info(f"Resized token embeddings to {target_vocab_size}")
+
+    # CRITICAL: Also update the model's internal config to reflect new vocab size
+    # This ensures consistency throughout training
+    if hasattr(model.language_model, 'config'):
+        model.language_model.config.vocab_size = target_vocab_size
+        logger.info(f"Updated language_model.config.vocab_size to {target_vocab_size}")
+    if hasattr(model.language_model, 'model') and hasattr(model.language_model.model, 'config'):
+        model.language_model.model.config.vocab_size = target_vocab_size
+        logger.info(f"Updated language_model.model.config.vocab_size to {target_vocab_size}")
+
+    # Verify embedding size after resize
+    actual_vocab_size = None
+    if hasattr(model.language_model, 'get_input_embeddings'):
+        actual_vocab_size = model.language_model.get_input_embeddings().weight.shape[0]
+    elif hasattr(model.language_model, 'model'):
+        if hasattr(model.language_model.model, 'get_input_embeddings'):
+            actual_vocab_size = model.language_model.model.get_input_embeddings().weight.shape[0]
+
+    if actual_vocab_size is not None:
+        if actual_vocab_size != target_vocab_size:
+            raise RuntimeError(
+                f"❌ Embedding resize failed! Actual: {actual_vocab_size}, Expected: {target_vocab_size}"
+            )
+        logger.info(f"✓ Verified embedding size: {actual_vocab_size}")
+
+    # Synchronize all ranks after model initialization
+    if args.distributed:
+        import torch.distributed as dist
+        if dist.is_initialized():
+            dist.barrier()
+            logger.info("All ranks synchronized after model initialization")
 
     # Training configuration
     training_config = TrainingConfig(

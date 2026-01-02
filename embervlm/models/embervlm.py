@@ -282,6 +282,29 @@ class EmberVLM(nn.Module):
         batch_size, seq_len = input_ids.size()
         device = input_ids.device
 
+        # CRITICAL SAFEGUARD: Validate input_ids before embedding lookup
+        # This prevents CUDA index out of bounds errors
+        vocab_size = self.language_model.get_input_embeddings().weight.shape[0]
+        max_token_id = input_ids.max().item()
+
+        if max_token_id >= vocab_size:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(
+                f"❌ CRITICAL: input_ids contain token ID {max_token_id} >= vocab_size {vocab_size}! "
+                f"Clamping to prevent CUDA crash."
+            )
+            # Clamp to valid range - use vocab_size - 1 (typically EOS or pad)
+            input_ids = torch.clamp(input_ids, max=vocab_size - 1)
+
+        # Also check for any negative indices (except -100 which shouldn't be in input_ids)
+        min_token_id = input_ids.min().item()
+        if min_token_id < 0:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"❌ CRITICAL: input_ids contain negative token ID {min_token_id}! Clamping to 0.")
+            input_ids = torch.clamp(input_ids, min=0)
+
         # Get text embeddings
         text_embeds = self.language_model.embed_tokens(input_ids)
 

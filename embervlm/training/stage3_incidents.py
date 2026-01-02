@@ -224,6 +224,41 @@ class Stage3Trainer:
         labels = batch['labels'].to(self.device)
         robot_targets = batch['robot_target'].to(self.device)
 
+        # CRITICAL: Validate input_ids are within embedding bounds before forward pass
+        # This prevents cryptic CUDA index out of bounds errors
+        model_ref = self.model.module if hasattr(self.model, 'module') else self.model
+
+        # Get actual embedding layer size
+        vocab_size = None
+        if hasattr(model_ref.language_model, 'get_input_embeddings'):
+            vocab_size = model_ref.language_model.get_input_embeddings().weight.shape[0]
+        elif hasattr(model_ref.language_model, 'model'):
+            if hasattr(model_ref.language_model.model, 'get_input_embeddings'):
+                vocab_size = model_ref.language_model.model.get_input_embeddings().weight.shape[0]
+
+        if vocab_size is not None:
+            max_token_id = input_ids.max().item()
+            if max_token_id >= vocab_size:
+                logger.error(
+                    f"❌ CRITICAL: input_ids contain token ID {max_token_id} >= vocab_size {vocab_size}!"
+                )
+                # Clamp to prevent crash - this is a safeguard
+                input_ids = torch.clamp(input_ids, max=vocab_size - 1)
+                logger.warning(f"   Token IDs clamped to valid range [0, {vocab_size - 1}]")
+
+            # Also validate labels (skip -100 which is ignore index)
+            valid_labels = labels[labels != -100]
+            if len(valid_labels) > 0:
+                max_label = valid_labels.max().item()
+                if max_label >= vocab_size:
+                    logger.error(f"❌ CRITICAL: labels contain token ID {max_label} >= vocab_size {vocab_size}!")
+                    labels = torch.where(
+                        (labels >= vocab_size) & (labels != -100),
+                        torch.tensor(vocab_size - 1, device=labels.device, dtype=labels.dtype),
+                        labels
+                    )
+                    logger.warning(f"   Labels clamped to valid range")
+
         with get_autocast_context(self.config):
             outputs = self.model(
                 input_ids=input_ids,
