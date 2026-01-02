@@ -266,6 +266,11 @@ def run_all_stages(args: argparse.Namespace):
             from embervlm.training.train_utils import unwrap_model
             model_unwrapped = unwrap_model(model)
 
+            # Move model to CPU temporarily to safely resize embeddings
+            device_before = next(model_unwrapped.parameters()).device
+            model_unwrapped = model_unwrapped.cpu()
+            torch.cuda.empty_cache()
+
             # Check embedding size vs tokenizer size
             current_vocab_size = None
             if hasattr(model_unwrapped.language_model, 'get_input_embeddings'):
@@ -284,13 +289,49 @@ def run_all_stages(args: argparse.Namespace):
                 logger.info(f"🔧 Resizing embeddings to match tokenizer...")
 
                 # Resize embeddings to match tokenizer
-                if hasattr(model_unwrapped.language_model, 'resize_token_embeddings'):
-                    model_unwrapped.language_model.resize_token_embeddings(required_vocab_size)
-                    logger.info(f"✓ Resized embeddings via resize_token_embeddings()")
-                elif hasattr(model_unwrapped.language_model, 'model'):
-                    if hasattr(model_unwrapped.language_model.model, 'resize_token_embeddings'):
-                        model_unwrapped.language_model.model.resize_token_embeddings(required_vocab_size)
-                        logger.info(f"✓ Resized embeddings via model.resize_token_embeddings()")
+                try:
+                    if hasattr(model_unwrapped.language_model, 'resize_token_embeddings'):
+                        model_unwrapped.language_model.resize_token_embeddings(required_vocab_size)
+                        logger.info(f"✓ Resized embeddings via resize_token_embeddings()")
+                    elif hasattr(model_unwrapped.language_model, 'model'):
+                        if hasattr(model_unwrapped.language_model.model, 'resize_token_embeddings'):
+                            model_unwrapped.language_model.model.resize_token_embeddings(required_vocab_size)
+                            logger.info(f"✓ Resized embeddings via model.resize_token_embeddings()")
+
+                    # Also resize LM head if it exists
+                    if hasattr(model_unwrapped.language_model, 'lm_head'):
+                        old_lm_head = model_unwrapped.language_model.lm_head
+                        new_lm_head = torch.nn.Linear(
+                            old_lm_head.in_features,
+                            required_vocab_size,
+                            bias=old_lm_head.bias is not None
+                        )
+                        # Copy old weights
+                        with torch.no_grad():
+                            new_lm_head.weight[:current_vocab_size] = old_lm_head.weight
+                            if old_lm_head.bias is not None:
+                                new_lm_head.bias[:current_vocab_size] = old_lm_head.bias
+                        model_unwrapped.language_model.lm_head = new_lm_head
+                        logger.info(f"✓ Resized LM head to {required_vocab_size}")
+                    elif hasattr(model_unwrapped.language_model, 'model'):
+                        if hasattr(model_unwrapped.language_model.model, 'lm_head'):
+                            old_lm_head = model_unwrapped.language_model.model.lm_head
+                            new_lm_head = torch.nn.Linear(
+                                old_lm_head.in_features,
+                                required_vocab_size,
+                                bias=old_lm_head.bias is not None
+                            )
+                            # Copy old weights
+                            with torch.no_grad():
+                                new_lm_head.weight[:current_vocab_size] = old_lm_head.weight
+                                if old_lm_head.bias is not None:
+                                    new_lm_head.bias[:current_vocab_size] = old_lm_head.bias
+                            model_unwrapped.language_model.model.lm_head = new_lm_head
+                            logger.info(f"✓ Resized LM head to {required_vocab_size}")
+
+                except Exception as e:
+                    logger.error(f"❌ Failed to resize embeddings: {e}")
+                    raise RuntimeError(f"Failed to resize embeddings to match tokenizer vocabulary: {e}")
 
                 # Verify resize worked
                 new_vocab_size = None
@@ -303,10 +344,15 @@ def run_all_stages(args: argparse.Namespace):
                 if new_vocab_size == required_vocab_size:
                     logger.info(f"✅ Embedding resize successful: {new_vocab_size} tokens")
                 else:
-                    logger.error(f"❌ Embedding resize FAILED! Size is {new_vocab_size}, expected {required_vocab_size}")
-                    raise RuntimeError(f"Failed to resize embeddings to match tokenizer vocabulary")
+                    error_msg = f"❌ Embedding resize FAILED! Size is {new_vocab_size}, expected {required_vocab_size}"
+                    logger.error(error_msg)
+                    raise RuntimeError(error_msg)
             else:
                 logger.info(f"✓ Embedding size matches tokenizer: {required_vocab_size} tokens")
+
+            # Move model back to original device
+            model_unwrapped = model_unwrapped.to(device_before)
+            torch.cuda.synchronize()
 
             # Use the unwrapped model for Stage 3
             model = model_unwrapped

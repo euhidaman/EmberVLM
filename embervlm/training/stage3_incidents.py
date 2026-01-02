@@ -97,12 +97,40 @@ class Stage3Trainer:
                     for token in tokenizer.additional_special_tokens:
                         token_id = tokenizer.convert_tokens_to_ids(token)
                         error_msg += f"    {token} → ID {token_id}\n"
+                    error_msg += f"\n"
+                    error_msg += f"SOLUTION: The train_all.py script should have resized the embeddings.\n"
+                    error_msg += f"If this error persists, manually resize embeddings in train_all.py\n"
+                    error_msg += f"before calling Stage 3 training.\n"
                     error_msg += f"{'='*80}\n"
 
                     logger.error(error_msg)
                     raise ValueError(error_msg)
                 else:
                     logger.info(f"✓ Embedding size validation passed: {current_vocab_size} tokens")
+
+                    # Additional validation: Check if special tokens are actually within bounds
+                    special_token_ids = [tokenizer.convert_tokens_to_ids(token) for token in tokenizer.additional_special_tokens]
+                    max_special_id = max(special_token_ids) if special_token_ids else 0
+
+                    if max_special_id >= current_vocab_size:
+                        error_msg = (
+                            f"\n{'='*80}\n"
+                            f"❌ CRITICAL ERROR: Special token ID out of bounds!\n"
+                            f"{'='*80}\n"
+                            f"  Maximum special token ID: {max_special_id}\n"
+                            f"  Model embedding layer size: {current_vocab_size}\n"
+                            f"\n"
+                            f"Special token IDs:\n"
+                        )
+                        for token, token_id in zip(tokenizer.additional_special_tokens, special_token_ids):
+                            status = "❌ OUT OF BOUNDS" if token_id >= current_vocab_size else "✓ OK"
+                            error_msg += f"    {token} → ID {token_id} {status}\n"
+                        error_msg += f"{'='*80}\n"
+                        logger.error(error_msg)
+                        raise ValueError(error_msg)
+                    else:
+                        logger.info(f"✓ All special tokens within valid range (max ID: {max_special_id})")
+
 
         # Ensure model is on correct device before DDP
         try:
