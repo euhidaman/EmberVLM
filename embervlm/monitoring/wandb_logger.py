@@ -445,6 +445,7 @@ class EnhancedWandbLogger(WandbLogger):
     Enhanced W&B logger with comprehensive visualizations.
 
     Adds publication-quality plots, attention maps, and convergence analysis.
+    Supports stage-specific visualizations for EmberVLM training.
     """
 
     def __init__(self, *args, **kwargs):
@@ -452,13 +453,34 @@ class EnhancedWandbLogger(WandbLogger):
 
         # Initialize visualizer with error handling
         self.visualizer = None
+        self.stage_visualizers = {}
         output_dir = kwargs.get('output_dir', './outputs/visualizations')
+        self.current_stage = kwargs.get('stage', 1)
 
         try:
             from embervlm.monitoring.visualization import TrainingVisualizer
             logger.info(f"Initializing TrainingVisualizer with output_dir: {output_dir}")
             self.visualizer = TrainingVisualizer(output_dir=output_dir)
             logger.info(f"✓ TrainingVisualizer initialized successfully! Visualizations will be saved to: {output_dir}")
+
+            # Initialize stage-specific visualizers
+            try:
+                from embervlm.monitoring.stage_visualizations import (
+                    Stage1Visualizer, Stage2Visualizer,
+                    Stage3Visualizer, Stage4Visualizer,
+                    CrossStageVisualizer
+                )
+                self.stage_visualizers = {
+                    1: Stage1Visualizer(output_dir=f"{output_dir}/stage1"),
+                    2: Stage2Visualizer(output_dir=f"{output_dir}/stage2"),
+                    3: Stage3Visualizer(output_dir=f"{output_dir}/stage3"),
+                    4: Stage4Visualizer(output_dir=f"{output_dir}/stage4"),
+                }
+                self.cross_stage_viz = CrossStageVisualizer(output_dir=output_dir)
+                logger.info("✓ Stage visualizers initialized")
+            except Exception as e:
+                logger.warning(f"Failed to initialize stage visualizers: {e}")
+                self.stage_visualizers = {}
         except Exception as e:
             logger.error(f"✗ Failed to initialize TrainingVisualizer: {e}", exc_info=True)
             logger.warning("Visualizations will be disabled. Only basic metrics will be logged.")
@@ -639,4 +661,356 @@ class EnhancedWandbLogger(WandbLogger):
         if self.visualizer:
             self.visualizer.close()
         super().finish()
+
+    # ==================== STAGE-SPECIFIC LOGGING ====================
+
+    def set_stage(self, stage: int):
+        """Set the current training stage."""
+        self.current_stage = stage
+        logger.info(f"W&B logger set to Stage {stage}")
+
+    def get_stage_visualizer(self, stage: int = None):
+        """Get visualizer for specific stage."""
+        stage = stage or self.current_stage
+        return self.stage_visualizers.get(stage)
+
+    # Stage 1: Visual-Language Alignment
+    def log_similarity_matrix(
+        self,
+        image_embeds: Any,
+        text_embeds: Any,
+        step: int,
+    ):
+        """Log image-text similarity matrix for Stage 1."""
+        if not self.enabled:
+            return
+
+        viz = self.get_stage_visualizer(1)
+        if viz is None:
+            return
+
+        try:
+            _, img = viz.plot_similarity_matrix(image_embeds, text_embeds, step)
+            self.log_image("stage1/similarity_matrix", img, step=step)
+        except Exception as e:
+            logger.warning(f"Failed to log similarity matrix: {e}")
+
+    def log_embedding_tsne(
+        self,
+        image_embeds: Any,
+        text_embeds: Any,
+        step: int,
+    ):
+        """Log t-SNE visualization of embeddings."""
+        if not self.enabled:
+            return
+
+        viz = self.get_stage_visualizer(1)
+        if viz is None:
+            return
+
+        try:
+            _, img = viz.plot_embedding_tsne(image_embeds, text_embeds, step)
+            self.log_image("stage1/embedding_tsne", img, step=step)
+        except Exception as e:
+            logger.warning(f"Failed to log t-SNE: {e}")
+
+    def log_retrieval_examples(
+        self,
+        images: List,
+        captions: List[str],
+        image_embeds: Any,
+        text_embeds: Any,
+        step: int,
+    ):
+        """Log retrieval examples for Stage 1."""
+        if not self.enabled:
+            return
+
+        viz = self.get_stage_visualizer(1)
+        if viz is None:
+            return
+
+        try:
+            _, img = viz.plot_retrieval_examples(
+                images, captions, image_embeds, text_embeds, step
+            )
+            self.log_image("stage1/retrieval_examples", img, step=step)
+        except Exception as e:
+            logger.warning(f"Failed to log retrieval examples: {e}")
+
+    # Stage 2: Instruction Tuning
+    def log_generation_examples(
+        self,
+        images: List,
+        instructions: List[str],
+        generated: List[str],
+        ground_truth: List[str],
+        step: int,
+    ):
+        """Log generation examples for Stage 2."""
+        if not self.enabled:
+            return
+
+        viz = self.get_stage_visualizer(2)
+        if viz is None:
+            return
+
+        try:
+            _, img = viz.plot_generation_examples(
+                images, instructions, generated, ground_truth, step
+            )
+            self.log_image("stage2/generation_examples", img, step=step)
+        except Exception as e:
+            logger.warning(f"Failed to log generation examples: {e}")
+
+    def log_token_probabilities(
+        self,
+        logits: Any,
+        labels: Any,
+        step: int,
+    ):
+        """Log token probability distribution."""
+        if not self.enabled:
+            return
+
+        viz = self.get_stage_visualizer(2)
+        if viz is None:
+            return
+
+        try:
+            _, img = viz.plot_token_probability_distribution(logits, labels, step)
+            self.log_image("stage2/token_probabilities", img, step=step)
+        except Exception as e:
+            logger.warning(f"Failed to log token probabilities: {e}")
+
+    # Stage 3: Robot Selection
+    def log_robot_confusion_matrix(
+        self,
+        predictions: Any,
+        labels: Any,
+        step: int,
+    ):
+        """Log robot selection confusion matrix."""
+        if not self.enabled:
+            return
+
+        viz = self.get_stage_visualizer(3)
+        if viz is None:
+            return
+
+        try:
+            _, img = viz.plot_confusion_matrix(predictions, labels, step)
+            self.log_image("stage3/confusion_matrix", img, step=step)
+        except Exception as e:
+            logger.warning(f"Failed to log confusion matrix: {e}")
+
+    def log_robot_radar_chart(
+        self,
+        metrics: Dict[str, Dict[str, float]],
+        step: int,
+    ):
+        """Log per-robot performance radar chart."""
+        if not self.enabled:
+            return
+
+        viz = self.get_stage_visualizer(3)
+        if viz is None:
+            return
+
+        try:
+            _, img = viz.plot_per_robot_radar(metrics, step)
+            self.log_image("stage3/robot_radar", img, step=step)
+        except Exception as e:
+            logger.warning(f"Failed to log radar chart: {e}")
+
+    def log_calibration_plot(
+        self,
+        confidences: Any,
+        correct: Any,
+        step: int,
+    ):
+        """Log confidence calibration plot."""
+        if not self.enabled:
+            return
+
+        viz = self.get_stage_visualizer(3)
+        if viz is None:
+            return
+
+        try:
+            _, img = viz.plot_confidence_calibration(confidences, correct, step)
+            self.log_image("stage3/calibration", img, step=step)
+        except Exception as e:
+            logger.warning(f"Failed to log calibration: {e}")
+
+    def log_reasoning_examples(
+        self,
+        tasks: List[str],
+        reasoning_chains: List[str],
+        predictions: List[str],
+        ground_truth: List[str],
+        correct: List[bool],
+        step: int,
+    ):
+        """Log reasoning chain examples."""
+        if not self.enabled:
+            return
+
+        viz = self.get_stage_visualizer(3)
+        if viz is None:
+            return
+
+        try:
+            _, img = viz.plot_reasoning_examples(
+                tasks, reasoning_chains, predictions, ground_truth, correct, step
+            )
+            self.log_image("stage3/reasoning_examples", img, step=step)
+        except Exception as e:
+            logger.warning(f"Failed to log reasoning examples: {e}")
+
+    # Stage 4: Chain-of-Thought Reasoning
+    def log_reasoning_quality(
+        self,
+        coherence_scores: List[float],
+        consistency_scores: List[float],
+        step_counts: List[int],
+        step: int,
+    ):
+        """Log reasoning quality metrics."""
+        if not self.enabled:
+            return
+
+        viz = self.get_stage_visualizer(4)
+        if viz is None:
+            return
+
+        try:
+            _, img = viz.plot_reasoning_quality_metrics(
+                coherence_scores, consistency_scores, step_counts, step
+            )
+            self.log_image("stage4/reasoning_quality", img, step=step)
+        except Exception as e:
+            logger.warning(f"Failed to log reasoning quality: {e}")
+
+    def log_phase_comparison(
+        self,
+        phase1_history: Dict[str, List[float]],
+        phase2_history: Dict[str, List[float]],
+        step: int,
+    ):
+        """Log Phase 1 vs Phase 2 comparison."""
+        if not self.enabled:
+            return
+
+        viz = self.get_stage_visualizer(4)
+        if viz is None:
+            return
+
+        try:
+            _, img = viz.plot_phase_comparison(phase1_history, phase2_history, step)
+            self.log_image("stage4/phase_comparison", img, step=step)
+        except Exception as e:
+            logger.warning(f"Failed to log phase comparison: {e}")
+
+    def log_cot_comparison(
+        self,
+        tasks: List[str],
+        without_cot: List,
+        with_cot: List,
+        step: int,
+    ):
+        """Log CoT comparison examples."""
+        if not self.enabled:
+            return
+
+        viz = self.get_stage_visualizer(4)
+        if viz is None:
+            return
+
+        try:
+            _, img = viz.plot_cot_examples(tasks, without_cot, with_cot, step)
+            self.log_image("stage4/cot_comparison", img, step=step)
+        except Exception as e:
+            logger.warning(f"Failed to log CoT comparison: {e}")
+
+    # Cross-Stage Visualizations
+    def log_stage_progression(
+        self,
+        eval_results: Dict[int, Dict[str, float]],
+    ):
+        """Log benchmark progression across stages."""
+        if not self.enabled or not hasattr(self, 'cross_stage_viz'):
+            return
+
+        try:
+            _, img = self.cross_stage_viz.plot_stage_progression(eval_results)
+            self.log_image("cross_stage/progression", img)
+        except Exception as e:
+            logger.warning(f"Failed to log stage progression: {e}")
+
+    def log_training_summary(
+        self,
+        all_metrics: Dict[int, Dict[str, List[float]]],
+    ):
+        """Log comprehensive training summary."""
+        if not self.enabled or not hasattr(self, 'cross_stage_viz'):
+            return
+
+        try:
+            _, img = self.cross_stage_viz.plot_training_summary(all_metrics)
+            self.log_image("cross_stage/training_summary", img)
+        except Exception as e:
+            logger.warning(f"Failed to log training summary: {e}")
+
+    def log_carbon_footprint(
+        self,
+        emissions_per_stage: Dict[int, float],
+    ):
+        """Log carbon footprint analysis."""
+        if not self.enabled or not hasattr(self, 'cross_stage_viz'):
+            return
+
+        try:
+            _, img = self.cross_stage_viz.plot_carbon_footprint(emissions_per_stage)
+            self.log_image("cross_stage/carbon_footprint", img)
+        except Exception as e:
+            logger.warning(f"Failed to log carbon footprint: {e}")
+
+    def log_evaluation_results(
+        self,
+        results: Dict[str, Any],
+        stage: int,
+    ):
+        """Log VLMEvalKit evaluation results."""
+        if not self.enabled:
+            return
+
+        try:
+            # Log individual benchmark scores
+            if 'results' in results:
+                for benchmark, score in results['results'].items():
+                    if isinstance(score, dict):
+                        for metric, value in score.items():
+                            if isinstance(value, (int, float)):
+                                self.log({f"eval/{benchmark}/{metric}": value})
+                    elif isinstance(score, (int, float)):
+                        self.log({f"eval/{benchmark}": score})
+
+            # Log robot selection metrics
+            if 'robot_selection' in results:
+                for metric, value in results['robot_selection'].items():
+                    if isinstance(value, (int, float)):
+                        self.log({f"eval/robot_selection/{metric}": value})
+
+            # Log calibration
+            if 'calibration' in results:
+                for metric, value in results['calibration'].items():
+                    if isinstance(value, (int, float)):
+                        self.log({f"eval/calibration/{metric}": value})
+
+            logger.info(f"Logged evaluation results for Stage {stage}")
+
+        except Exception as e:
+            logger.warning(f"Failed to log evaluation results: {e}")
 

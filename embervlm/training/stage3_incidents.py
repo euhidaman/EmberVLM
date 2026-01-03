@@ -450,41 +450,44 @@ class Stage3Trainer:
         metrics = self.robot_metrics.compute()
 
         if is_main_process():
-            logger.info(f"Evaluation: {metrics}")
+            logger.info(f"Validation: {metrics}")
 
             if self.wandb_logger is not None:
                 self.wandb_logger.log(metrics, step=self.global_step)
 
                 # Log confusion matrix visualization
-                if hasattr(self.wandb_logger, 'log_confusion_matrix'):
-                    confusion_matrix = self.robot_metrics.get_confusion_matrix()
-                    robot_names = ["Drone", "Underwater", "Humanoid", "Wheeled", "Legged"]
+                if hasattr(self.wandb_logger, 'log_robot_confusion_matrix'):
+                    all_preds = self.robot_metrics.get_all_predictions()
+                    all_targets = self.robot_metrics.get_all_targets()
+                    if all_preds is not None and all_targets is not None:
+                        self.wandb_logger.log_robot_confusion_matrix(
+                            predictions=all_preds,
+                            labels=all_targets,
+                            step=self.global_step,
+                        )
 
-                    self.wandb_logger.log_confusion_matrix(
-                        predictions=None,  # Already aggregated in confusion_matrix
-                        labels=None,
-                        class_names=robot_names,
-                        step=self.global_step,
-                        stage_name="stage3",
-                        confusion_matrix=confusion_matrix,
-                    )
+                # Log per-robot radar chart
+                if hasattr(self.wandb_logger, 'log_robot_radar_chart'):
+                    per_robot_metrics = self.robot_metrics.get_per_robot_metrics()
+                    if per_robot_metrics:
+                        self.wandb_logger.log_robot_radar_chart(
+                            metrics=per_robot_metrics,
+                            step=self.global_step,
+                        )
 
-                # Log per-class metrics as bar chart
-                per_class_acc = self.robot_metrics.get_per_class_accuracy()
-                if hasattr(self.wandb_logger, 'log_bar_chart'):
-                    self.wandb_logger.log_bar_chart(
-                        data=per_class_acc,
-                        title="Per-Robot Accuracy",
-                        x_label="Robot Type",
-                        y_label="Accuracy",
-                        step=self.global_step,
-                        stage_name="stage3",
-                    )
-
-            logger.info(f"Evaluation: {avg_metrics}")
+                # Log calibration plot
+                if hasattr(self.wandb_logger, 'log_calibration_plot'):
+                    all_confidences = self.robot_metrics.get_all_confidences()
+                    all_correct = self.robot_metrics.get_all_correct()
+                    if all_confidences is not None and all_correct is not None:
+                        self.wandb_logger.log_calibration_plot(
+                            confidences=all_confidences,
+                            correct=all_correct,
+                            step=self.global_step,
+                        )
 
         self.model.train()
-        return avg_metrics
+        return metrics
 
     def save_checkpoint(self):
         """Save checkpoint."""

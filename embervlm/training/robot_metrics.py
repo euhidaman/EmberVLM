@@ -46,6 +46,10 @@ class RobotSelectionMetrics:
         self.total_samples = 0
         self.correct_predictions_count = 0
 
+        # Store all predictions and targets for visualization
+        self.all_predictions = []
+        self.all_targets = []
+
     def update(
         self,
         predictions: torch.Tensor,
@@ -61,6 +65,10 @@ class RobotSelectionMetrics:
         # Convert to numpy
         preds_np = predictions.cpu().numpy()
         targets_np = targets.cpu().numpy()
+
+        # Store for visualization
+        self.all_predictions.extend(preds_np.tolist())
+        self.all_targets.extend(targets_np.tolist())
 
         # Update confusion matrix
         for pred, target in zip(preds_np, targets_np):
@@ -169,6 +177,53 @@ class RobotSelectionMetrics:
             correct = self.confusion_matrix[i, i]
             accuracies[name] = correct / total if total > 0 else 0.0
         return accuracies
+
+    def get_all_predictions(self) -> Optional[np.ndarray]:
+        """Get all predictions as numpy array."""
+        if self.all_predictions:
+            return np.array(self.all_predictions)
+        return None
+
+    def get_all_targets(self) -> Optional[np.ndarray]:
+        """Get all targets as numpy array."""
+        if self.all_targets:
+            return np.array(self.all_targets)
+        return None
+
+    def get_all_confidences(self) -> Optional[np.ndarray]:
+        """Get all confidence scores as numpy array."""
+        if self.confidences:
+            return np.array(self.confidences)
+        return None
+
+    def get_all_correct(self) -> Optional[np.ndarray]:
+        """Get all correct prediction flags as numpy array."""
+        if self.correct_predictions:
+            return np.array(self.correct_predictions)
+        return None
+
+    def get_per_robot_metrics(self) -> Dict[str, Dict[str, float]]:
+        """Get per-robot precision, recall, F1 for radar chart visualization."""
+        metrics = {'precision': {}, 'recall': {}, 'f1': {}}
+
+        for i, robot_name in enumerate(self.robot_names):
+            # True positives, false positives, false negatives
+            tp = self.confusion_matrix[i, i]
+            fp = self.confusion_matrix[:, i].sum() - tp
+            fn = self.confusion_matrix[i, :].sum() - tp
+
+            # Precision, recall, F1
+            precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
+
+            # Use shorter names for visualization
+            short_name = robot_name.replace("Robot with ", "").replace(" Robot", "")
+            metrics['precision'][short_name] = precision
+            metrics['recall'][short_name] = recall
+            metrics['f1'][short_name] = f1
+
+        return metrics
 
 
 class ReasoningQualityMetrics:
