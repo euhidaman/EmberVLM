@@ -309,26 +309,63 @@ EmberVLM/
 
 ### Full Training (All 4 Stages)
 
+**Recommended Training Command:**
+
 ```bash
+PYTHONUNBUFFERED=1 \
 torchrun --nproc_per_node=2 scripts/train_all.py \
-    --output_dir ./outputs \
-    --stage all \
-    --distributed \
-    --mixed_precision bf16 \
-    --batch_size 32 \
-    --learning_rate 2e-4 \
-    --gradient_accumulation 4 \
-    --save_steps 500 \
-    --log_steps 50 \
-    --stage1_data data/base_vlm \
-    --stage2_data data/base_vlm/llava \
-    --robot_data robot-selection-dataset \
-    --stage1_epochs 3 \
-    --stage2_epochs 3 \
-    --stage3_robot_epochs 30
+  --output_dir ./outputs \
+  --stage all \
+  --distributed \
+  --mixed_precision bf16 \
+  --batch_size 32 \
+  --learning_rate 2e-4 \
+  --gradient_accumulation 4 \
+  --stage1_data data/base_vlm \
+  --stage2_data data/base_vlm/llava \
+  --robot_data robot-selection-dataset \
+  --stage1_epochs 3 \
+  --stage2_epochs 3 \
+  --stage3_robot_epochs 30 \
+  2>&1 | tee train.log
 ```
 
-**Note**: `--eval_steps` defaults to 500 (same as `--save_steps`), so it's optional.
+**Command Breakdown:**
+
+- `PYTHONUNBUFFERED=1`: Disable Python output buffering for real-time logs
+- `torchrun --nproc_per_node=2`: Launch distributed training on 2 GPUs
+- `--stage all`: Train all 4 stages sequentially (1→2→3→4)
+- `--distributed`: Enable DDP (DistributedDataParallel)
+- `--mixed_precision bf16`: Use bfloat16 for faster training and lower memory
+- `--batch_size 32`: Per-GPU batch size (effective batch = 32 × 2 × 4 = 256)
+- `--gradient_accumulation 4`: Accumulate gradients over 4 steps
+- `--save_steps 500`: Save checkpoint every 500 steps (default)
+- `--eval_steps 500`: Run evaluation every 500 steps (default)
+- `--log_steps 50`: Log metrics every 50 steps (default)
+- `2>&1 | tee train.log`: Save all output to `train.log` while showing on terminal
+
+**Optional Flags:**
+
+```bash
+# Adjust evaluation frequency
+--eval_steps 1000  # Evaluate less often (faster training)
+
+# Adjust saving frequency
+--save_steps 1000  # Save checkpoints less often (save disk space)
+
+# Custom learning rate schedule
+--warmup_steps 1000  # Warmup steps (default: 500)
+--weight_decay 0.01  # Weight decay (default: 0.01)
+
+# Memory optimization
+--batch_size 16 --gradient_accumulation 8  # Same effective batch, less memory
+
+# Enable W&B logging
+export WANDB_API_KEY=your_key  # Set before running
+
+# Disable W&B logging
+export DISABLE_WANDB=1  # Set before running
+```
 
 **Training Time (2× A100 80GB):**
 - Stage 1: **~48-72 hours** (~5M samples across 11 datasets, batches depend on data loader sampling)
@@ -433,6 +470,368 @@ torchrun --nproc_per_node=2 scripts/train_all.py \
 | Budget | 2× RTX 3090 | 48GB | 8 | ~8 hours |
 
 **For single GPU:** Set `--batch_size 16` and `--gradient_accumulation 8` to maintain effective batch size.
+
+---
+
+## Evaluation
+
+EmberVLM supports comprehensive evaluation at each training stage using both internal metrics and standardized Vision-Language Model benchmarks via [VLMEvalKit](https://github.com/open-compass/VLMEvalKit).
+
+### Evaluation Overview
+
+EmberVLM is evaluated on **stage-appropriate benchmarks** matching the SmolVLM evaluation protocol:
+
+| Stage | Focus | Benchmarks | Purpose |
+|-------|-------|------------|---------|
+| **Stage 1** | Vision-Language Alignment | MME (perception), SEEDBench_IMG | Test if vision-language alignment is working |
+| **Stage 2** | Instruction Following | MMBench, TextVQA, AI2D, ScienceQA | Measure instruction comprehension and VQA |
+| **Stage 3** | Robot Selection | Stage 2 + MMStar + Internal Metrics | Test robot selection accuracy and reasoning |
+| **Stage 4** | Chain-of-Thought Reasoning | Full benchmark suite (14 benchmarks) | Comprehensive VLM capability assessment |
+
+### Quick Evaluation (Internal Metrics Only)
+
+For fast evaluation without VLMEvalKit dependency:
+
+```bash
+python scripts/evaluate_vlmevalkit.py \
+    --model_path outputs/stage3 \
+    --stage 3 \
+    --quick \
+    --output_dir eval_outputs
+```
+
+**Output:**
+```
+============================================================
+EVALUATION SUMMARY
+============================================================
+Model: outputs/stage3
+Stage: 3
+------------------------------------------------------------
+Robot Selection:
+  accuracy: 0.8542
+  macro_f1: 0.8367
+  macro_precision: 0.8421
+  macro_recall: 0.8314
+  expected_calibration_error: 0.0423
+------------------------------------------------------------
+Calibration:
+  ece: 0.0423
+  mce: 0.1234
+============================================================
+```
+
+### Full Evaluation (VLMEvalKit Benchmarks)
+
+#### Step 1: Install VLMEvalKit
+
+```bash
+# Clone VLMEvalKit
+cd D:/BabyLM  # or your workspace
+git clone https://github.com/open-compass/VLMEvalKit.git
+cd VLMEvalKit
+
+# Install dependencies
+pip install -e .
+```
+
+#### Step 2: Download Benchmark Data
+
+VLMEvalKit automatically downloads most benchmarks on first use. For manual download:
+
+```bash
+cd VLMEvalKit
+python scripts/download_benchmarks.py --benchmarks MMBench_DEV_EN_V11 MME TextVQA_VAL
+```
+
+**Storage Requirements:**
+- MMBench: ~500MB
+- MME: ~1.5GB
+- TextVQA: ~8GB
+- Full benchmark suite: ~25GB
+
+#### Step 3: Run Evaluation
+
+**For a specific stage checkpoint:**
+
+```bash
+python scripts/evaluate_vlmevalkit.py \
+    --model_path outputs/stage3/checkpoint-15000 \
+    --stage 3 \
+    --output_dir eval_outputs/stage3 \
+    --log_wandb
+```
+
+**For all stages (after full training):**
+
+```bash
+# Stage 1 evaluation
+python scripts/evaluate_vlmevalkit.py \
+    --model_path outputs/stage1 \
+    --stage 1 \
+    --benchmarks MME SEEDBench_IMG \
+    --output_dir eval_outputs/stage1
+
+# Stage 2 evaluation
+python scripts/evaluate_vlmevalkit.py \
+    --model_path outputs/stage2 \
+    --stage 2 \
+    --benchmarks MMBench_DEV_EN_V11 TextVQA_VAL AI2D_TEST ScienceQA_VAL \
+    --output_dir eval_outputs/stage2
+
+# Stage 3 evaluation (includes internal robot metrics)
+python scripts/evaluate_vlmevalkit.py \
+    --model_path outputs/stage3 \
+    --stage 3 \
+    --output_dir eval_outputs/stage3
+
+# Stage 4 evaluation (full benchmark suite)
+python scripts/evaluate_vlmevalkit.py \
+    --model_path outputs/stage4 \
+    --stage 4 \
+    --output_dir eval_outputs/stage4
+```
+
+### Evaluation During Training
+
+Evaluation is **automatically triggered** during training at regular intervals:
+
+```bash
+# Training with automatic evaluation every 500 steps
+PYTHONUNBUFFERED=1 \
+torchrun --nproc_per_node=2 scripts/train_all.py \
+  --output_dir ./outputs \
+  --stage all \
+  --distributed \
+  --mixed_precision bf16 \
+  --batch_size 32 \
+  --learning_rate 2e-4 \
+  --gradient_accumulation 4 \
+  --eval_steps 500 \
+  --save_steps 500 \
+  --stage1_data data/base_vlm \
+  --stage2_data data/base_vlm/llava \
+  --robot_data robot-selection-dataset \
+  --stage1_epochs 3 \
+  --stage2_epochs 3 \
+  --stage3_robot_epochs 30 \
+  2>&1 | tee train.log
+```
+
+**What happens during training:**
+
+1. **Every `--eval_steps` (default: 500):**
+   - Internal validation on val split
+   - Robot selection metrics (accuracy, F1, calibration)
+   - Confusion matrix visualization logged to W&B
+   - Per-robot performance radar chart
+
+2. **End of each epoch:**
+   - Full validation metrics computed
+   - Best checkpoint saved based on validation loss
+
+3. **Stage completion:**
+   - Final checkpoint saved
+   - Training summary visualizations
+   - Carbon footprint tracking
+
+### Supported Benchmarks
+
+#### Stage 1 Benchmarks (Vision-Language Alignment)
+
+- **MME (Perception)**: Multi-task evaluation (existence, count, position, color, OCR)
+- **SEEDBench_IMG**: Image understanding with 12K questions
+
+#### Stage 2 Benchmarks (Instruction Tuning)
+
+- **MMBench_DEV_EN_V11**: Multi-modal reasoning benchmark (~3K questions)
+- **TextVQA_VAL**: Text reading in images (~5K questions)
+- **AI2D_TEST**: Diagram understanding (~1K questions)
+- **ScienceQA_VAL**: Science question answering (~6K questions)
+
+#### Stage 3 Benchmarks (Robot Selection)
+
+- All Stage 2 benchmarks
+- **MMStar**: Challenging multi-modal reasoning
+- **Internal metrics**:
+  - Robot selection accuracy (5-way classification)
+  - Per-robot precision/recall/F1 (Drone, Underwater, Humanoid, Wheeled, Legged)
+  - Confidence calibration (ECE, MCE)
+  - Multi-robot coordination metrics (Jaccard similarity)
+
+#### Stage 4 Benchmarks (Full Evaluation)
+
+All previous benchmarks plus:
+
+- **MMMU_DEV_VAL**: Multi-discipline college-level questions
+- **MathVista_MINI**: Mathematical reasoning in visual contexts
+- **ChartQA_TEST**: Chart understanding
+- **DocVQA_VAL**: Document question answering
+- **OCRBench**: Comprehensive OCR evaluation
+- **HallusionBench**: Hallucination detection
+- **MMVet**: Veterinary and general knowledge
+
+### Benchmark Results Format
+
+Evaluation results are saved in JSON format:
+
+```json
+{
+  "model_path": "outputs/stage3/checkpoint-15000",
+  "stage": 3,
+  "timestamp": "2026-01-04T10:30:00",
+  "benchmarks": ["MMBench_DEV_EN_V11", "TextVQA_VAL", "AI2D_TEST"],
+  "results": {
+    "MMBench_DEV_EN_V11": {
+      "accuracy": 0.6234,
+      "num_questions": 2974
+    },
+    "TextVQA_VAL": {
+      "accuracy": 0.4512,
+      "num_questions": 5000
+    },
+    "robot_selection": {
+      "accuracy": 0.8542,
+      "macro_f1": 0.8367,
+      "Drone_f1": 0.8901,
+      "Underwater_Robot_f1": 0.8734,
+      "Humanoid_f1": 0.7923,
+      "Robot_with_Wheels_f1": 0.8512,
+      "Robot_with_Legs_f1": 0.8265
+    }
+  }
+}
+```
+
+### Weights & Biases (W&B) Visualization
+
+All evaluation results are automatically logged to W&B with rich visualizations:
+
+**Stage-Specific Visualizations:**
+
+1. **Stage 1 (Alignment):**
+   - Image-text similarity heatmaps
+   - t-SNE embedding plots (image vs text)
+   - Top-K retrieval examples
+   - Cross-attention visualization
+
+2. **Stage 2 (Instruction Tuning):**
+   - Generation examples (image + instruction → generated vs ground truth)
+   - Token probability distributions
+   - Response length analysis
+   - Perplexity by position
+
+3. **Stage 3 (Robot Selection):**
+   - Confusion matrix (5×5 robot types)
+   - Per-robot radar chart (precision/recall/F1)
+   - Confidence calibration diagram
+   - Reasoning chain examples
+
+4. **Stage 4 (Chain-of-Thought):**
+   - Reasoning quality metrics
+   - Phase 1 vs Phase 2 comparison
+   - With/Without CoT examples
+   - Reasoning step analysis
+
+**Cross-Stage Visualizations:**
+
+- Benchmark score progression across stages
+- Training loss curves (all stages combined)
+- Carbon footprint timeline
+- Parameter efficiency tracking
+
+**Access W&B Dashboard:**
+
+```bash
+# Set W&B API key
+export WANDB_API_KEY=your_key_here
+
+# W&B will automatically sync during training
+# View at: https://wandb.ai/your-username/embervlm
+```
+
+### Evaluation Metrics Explained
+
+#### Robot Selection Metrics
+
+- **Accuracy**: Overall correct robot selections / total predictions
+- **Macro F1**: Average F1 across all 5 robot types (treats each class equally)
+- **Weighted F1**: F1 weighted by class frequency (accounts for imbalance)
+- **Per-Robot F1**: Individual F1 score for each robot type
+- **Expected Calibration Error (ECE)**: How well confidence scores match actual accuracy (lower is better, <0.05 is good)
+- **Maximum Calibration Error (MCE)**: Worst-case calibration error in any confidence bin
+
+#### Multi-Robot Metrics
+
+- **Exact Match Accuracy**: Percentage of tasks where all selected robots are correct
+- **Jaccard Similarity (IoU)**: Intersection over union of predicted vs ground truth robot sets
+- **Subtask Assignment Accuracy**: Correct robot assigned to correct subtask
+- **Execution Order Correlation**: Spearman correlation of predicted vs true execution order
+
+#### Reasoning Quality Metrics
+
+- **Coherence Score**: How well reasoning mentions selected robots (keyword overlap)
+- **Relevance Score**: Overlap between task keywords and reasoning keywords
+- **Step Count**: Average number of reasoning steps generated
+- **Consistency Loss**: Alignment between reasoning and final decision
+
+### Expected Performance
+
+Based on EmberVLM architecture (37.2M parameters, TinyLLM-30M backbone):
+
+| Benchmark | Expected Score | Notes |
+|-----------|---------------|-------|
+| **Internal (Robot Selection)** |
+| Robot Selection Accuracy | 85-90% | 5-way classification on test set |
+| Macro F1 | 83-88% | Average across all robot types |
+| ECE | 0.04-0.06 | Well-calibrated confidence scores |
+| **Stage 2 Benchmarks** |
+| MMBench_DEV_EN_V11 | 55-62% | Multi-modal reasoning |
+| TextVQA_VAL | 40-48% | Text reading in images |
+| AI2D_TEST | 50-58% | Diagram understanding |
+| ScienceQA_VAL | 60-68% | Science QA |
+| **Stage 4 Benchmarks** |
+| MME (Perception) | 1200-1400 | Total perception score |
+| MMMU_DEV_VAL | 30-38% | College-level questions |
+| MathVista_MINI | 25-32% | Mathematical visual reasoning |
+| OCRBench | 450-550 | OCR score (out of 1000) |
+
+**Note**: As a 37M parameter model, EmberVLM focuses on **efficiency** and **robot selection** rather than competing with large VLMs (7B+) on general benchmarks. The scores are comparable to other small VLMs like SmolVLM-256M.
+
+### Troubleshooting Evaluation
+
+**Issue: VLMEvalKit import error**
+```bash
+# Solution: Ensure VLMEvalKit is in Python path
+export PYTHONPATH="${PYTHONPATH}:/path/to/VLMEvalKit"
+# Or install it
+cd VLMEvalKit && pip install -e .
+```
+
+**Issue: Benchmark data not found**
+```bash
+# Solution: Download benchmarks
+cd VLMEvalKit
+python scripts/download_benchmarks.py --benchmarks MMBench_DEV_EN_V11
+```
+
+**Issue: Out of memory during evaluation**
+```bash
+# Solution: Reduce batch size
+python scripts/evaluate_vlmevalkit.py \
+    --model_path outputs/stage3 \
+    --batch_size 1 \
+    --stage 3
+```
+
+**Issue: Evaluation too slow**
+```bash
+# Solution: Use quick evaluation (internal metrics only)
+python scripts/evaluate_vlmevalkit.py \
+    --model_path outputs/stage3 \
+    --quick \
+    --stage 3
+```
 
 ---
 
