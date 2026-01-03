@@ -1590,6 +1590,160 @@ Validation accuracy oscillating randomly
 
 ---
 
+## Quick Reference: Evaluation Steps
+
+### During Training (Automatic)
+
+When you run training, evaluation happens automatically:
+
+```bash
+# Your training command (evaluation runs every 500 steps by default)
+PYTHONUNBUFFERED=1 \
+torchrun --nproc_per_node=2 scripts/train_all.py \
+  --output_dir ./outputs \
+  --stage all \
+  --distributed \
+  --mixed_precision bf16 \
+  --batch_size 32 \
+  --learning_rate 2e-4 \
+  --gradient_accumulation 4 \
+  --stage1_data data/base_vlm \
+  --stage2_data data/base_vlm/llava \
+  --robot_data robot-selection-dataset \
+  --stage1_epochs 3 \
+  --stage2_epochs 3 \
+  --stage3_robot_epochs 30 \
+  2>&1 | tee train.log
+```
+
+**What happens automatically:**
+- ✅ Validation metrics computed every 500 steps
+- ✅ Confusion matrices logged to W&B
+- ✅ Per-robot performance charts
+- ✅ Calibration plots
+- ✅ Checkpoints saved with metrics
+
+### After Training (Manual Evaluation)
+
+#### Step 1: Quick Evaluation (No VLMEvalKit)
+
+```bash
+# Fast internal metrics only
+python scripts/evaluate_vlmevalkit.py \
+    --model_path outputs/stage3 \
+    --stage 3 \
+    --quick \
+    --output_dir eval_outputs
+```
+
+**Output:**
+- Robot selection accuracy
+- Per-robot F1 scores
+- Calibration metrics (ECE, MCE)
+- Results saved to `eval_outputs/quick_eval_stage3.json`
+
+#### Step 2: Full Benchmark Evaluation (With VLMEvalKit)
+
+**First time only - Install VLMEvalKit:**
+```bash
+cd D:/BabyLM  # or your workspace
+git clone https://github.com/open-compass/VLMEvalKit.git
+cd VLMEvalKit
+pip install -e .
+```
+
+**Run evaluation:**
+```bash
+# Stage 3 evaluation (robot selection + benchmarks)
+python scripts/evaluate_vlmevalkit.py \
+    --model_path outputs/stage3 \
+    --stage 3 \
+    --output_dir eval_outputs/stage3 \
+    --log_wandb
+
+# Stage 4 evaluation (full benchmark suite)
+python scripts/evaluate_vlmevalkit.py \
+    --model_path outputs/stage4 \
+    --stage 4 \
+    --output_dir eval_outputs/stage4 \
+    --log_wandb
+```
+
+**Benchmarks evaluated:**
+- **Stage 3**: MMBench, TextVQA, AI2D, ScienceQA, MMStar + Internal metrics
+- **Stage 4**: All Stage 3 + MMMU, MathVista, ChartQA, DocVQA, OCRBench, HallusionBench, MMVet
+
+### View Results
+
+**1. Check JSON output:**
+```bash
+cat eval_outputs/stage3/evaluation_results_stage3.json
+```
+
+**2. View W&B dashboard:**
+- Go to: https://wandb.ai/your-username/embervlm
+- Navigate to your run
+- Check "eval" section for benchmark scores
+- View visualizations under each stage
+
+**3. Check training logs:**
+```bash
+# During training
+tail -f train.log | grep "Validation"
+
+# After training
+grep "val_loss\|accuracy\|macro_f1" train.log
+```
+
+### Expected Timeline
+
+| Action | When | What to Check |
+|--------|------|---------------|
+| **During Training** | Every 500 steps | W&B dashboard: loss curves, accuracy |
+| **End of Stage 3** | After 30 epochs | Internal metrics: accuracy ~85-90% |
+| **After Full Training** | 50-75 hours later | Run benchmark evaluation scripts |
+| **Results Analysis** | Next day | Compare to expected performance table |
+
+### Evaluation Checklist
+
+- [x] Training completed without errors
+- [x] Checkpoints saved in `outputs/stageX/`
+- [x] W&B dashboard shows training curves
+- [x] Quick evaluation passes (internal metrics)
+- [ ] VLMEvalKit installed (optional)
+- [ ] Full benchmark evaluation run (optional)
+- [ ] Results documented for your paper/report
+
+### Common Evaluation Commands
+
+```bash
+# Evaluate specific checkpoint
+python scripts/evaluate_vlmevalkit.py \
+    --model_path outputs/stage3/checkpoint-15000 \
+    --stage 3 \
+    --quick
+
+# Evaluate with specific benchmarks
+python scripts/evaluate_vlmevalkit.py \
+    --model_path outputs/stage3 \
+    --stage 3 \
+    --benchmarks MMBench_DEV_EN_V11 TextVQA_VAL
+
+# Evaluate without W&B logging
+python scripts/evaluate_vlmevalkit.py \
+    --model_path outputs/stage3 \
+    --stage 3 \
+    --quick  # W&B logging disabled in quick mode
+
+# Evaluate with W&B logging
+python scripts/evaluate_vlmevalkit.py \
+    --model_path outputs/stage3 \
+    --stage 3 \
+    --log_wandb
+```
+
+---
+
 ## Citation
 
 If you use EmberVLM in your research, please cite:
