@@ -245,6 +245,43 @@ class Stage4Trainer:
 
         reasoning_targets = batch.get('reasoning_chain')
 
+        # CRITICAL: Validate input_ids and labels are within embedding bounds
+        # This prevents cryptic CUDA index out of bounds errors
+        model_ref = self.model.module if hasattr(self.model, 'module') else self.model
+
+        vocab_size = None
+        if hasattr(model_ref.language_model, 'get_input_embeddings'):
+            vocab_size = model_ref.language_model.get_input_embeddings().weight.shape[0]
+        elif hasattr(model_ref.language_model, 'model'):
+            if hasattr(model_ref.language_model.model, 'get_input_embeddings'):
+                vocab_size = model_ref.language_model.model.get_input_embeddings().weight.shape[0]
+
+        if vocab_size is not None:
+            # Validate and clamp input_ids
+            max_token_id = input_ids.max().item()
+            min_token_id = input_ids.min().item()
+            if max_token_id >= vocab_size or min_token_id < 0:
+                if max_token_id >= vocab_size:
+                    logger.error(f"❌ input_ids max={max_token_id} >= vocab_size={vocab_size}")
+                if min_token_id < 0:
+                    logger.error(f"❌ input_ids min={min_token_id} < 0")
+                input_ids = torch.clamp(input_ids, min=0, max=vocab_size - 1)
+                logger.warning(f"   Token IDs clamped to valid range [0, {vocab_size - 1}]")
+
+            # Validate and clamp labels (preserve -100 ignore index)
+            valid_labels_mask = labels != -100
+            if valid_labels_mask.any():
+                valid_labels = labels[valid_labels_mask]
+                max_label = valid_labels.max().item()
+                min_label = valid_labels.min().item()
+                if max_label >= vocab_size or min_label < 0:
+                    labels = torch.where(
+                        valid_labels_mask,
+                        torch.clamp(labels, min=0, max=vocab_size - 1),
+                        labels
+                    )
+                    logger.warning(f"   Labels clamped to valid range [0, {vocab_size - 1}]")
+
         with get_autocast_context(self.config):
             outputs = self.model(
                 input_ids=input_ids,

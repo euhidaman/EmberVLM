@@ -407,6 +407,35 @@ class EmberVLM(nn.Module):
         # Adjust labels to match inputs_embeds length
         adjusted_labels = None
         if labels is not None:
+            # CRITICAL SAFEGUARD: Validate labels before they are used
+            # This prevents CUDA index out of bounds errors during loss computation
+            vocab_size = self.language_model.get_input_embeddings().weight.shape[0]
+            valid_labels_mask = labels != -100
+            if valid_labels_mask.any():
+                valid_labels = labels[valid_labels_mask]
+                max_label = valid_labels.max().item()
+                min_label = valid_labels.min().item()
+
+                if max_label >= vocab_size or min_label < 0:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    if max_label >= vocab_size:
+                        logger.error(
+                            f"❌ CRITICAL: labels contain token ID {max_label} >= vocab_size {vocab_size}! "
+                            f"Clamping to prevent CUDA crash."
+                        )
+                    if min_label < 0:
+                        logger.error(
+                            f"❌ CRITICAL: labels contain negative token ID {min_label}! "
+                            f"Clamping to prevent CUDA crash."
+                        )
+                    # Clamp labels: preserve -100 for ignore, clamp everything else to valid range
+                    labels = torch.where(
+                        valid_labels_mask,
+                        torch.clamp(labels, min=0, max=vocab_size - 1),
+                        labels
+                    )
+
             if labels.size(1) != inputs_embeds.size(1):
                 # Labels need to be extended to match inputs_embeds
                 batch_size = labels.size(0)

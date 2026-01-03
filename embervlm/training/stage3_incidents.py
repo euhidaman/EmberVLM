@@ -224,7 +224,7 @@ class Stage3Trainer:
         labels = batch['labels'].to(self.device)
         robot_targets = batch['robot_target'].to(self.device)
 
-        # CRITICAL: Validate input_ids are within embedding bounds before forward pass
+        # CRITICAL: Validate input_ids and labels are within embedding bounds before forward pass
         # This prevents cryptic CUDA index out of bounds errors
         model_ref = self.model.module if hasattr(self.model, 'module') else self.model
 
@@ -237,6 +237,7 @@ class Stage3Trainer:
                 vocab_size = model_ref.language_model.model.get_input_embeddings().weight.shape[0]
 
         if vocab_size is not None:
+            # Validate and clamp input_ids
             max_token_id = input_ids.max().item()
             if max_token_id >= vocab_size:
                 logger.error(
@@ -246,18 +247,33 @@ class Stage3Trainer:
                 input_ids = torch.clamp(input_ids, max=vocab_size - 1)
                 logger.warning(f"   Token IDs clamped to valid range [0, {vocab_size - 1}]")
 
-            # Also validate labels (skip -100 which is ignore index)
-            valid_labels = labels[labels != -100]
-            if len(valid_labels) > 0:
+            # Check for negative token IDs
+            min_token_id = input_ids.min().item()
+            if min_token_id < 0:
+                logger.error(f"❌ CRITICAL: input_ids contain negative token ID {min_token_id}!")
+                input_ids = torch.clamp(input_ids, min=0)
+                logger.warning(f"   Token IDs clamped to valid range [0, {vocab_size - 1}]")
+
+            # Validate and clamp labels (skip -100 which is ignore index)
+            valid_labels_mask = labels != -100
+            if valid_labels_mask.any():
+                valid_labels = labels[valid_labels_mask]
                 max_label = valid_labels.max().item()
-                if max_label >= vocab_size:
-                    logger.error(f"❌ CRITICAL: labels contain token ID {max_label} >= vocab_size {vocab_size}!")
+                min_label = valid_labels.min().item()
+
+                if max_label >= vocab_size or min_label < 0:
+                    if max_label >= vocab_size:
+                        logger.error(f"❌ CRITICAL: labels contain token ID {max_label} >= vocab_size {vocab_size}!")
+                    if min_label < 0:
+                        logger.error(f"❌ CRITICAL: labels contain negative token ID {min_label}!")
+
+                    # Clamp labels: preserve -100 for ignore, clamp everything else to valid range
                     labels = torch.where(
-                        (labels >= vocab_size) & (labels != -100),
-                        torch.tensor(vocab_size - 1, device=labels.device, dtype=labels.dtype),
+                        valid_labels_mask,
+                        torch.clamp(labels, min=0, max=vocab_size - 1),
                         labels
                     )
-                    logger.warning(f"   Labels clamped to valid range")
+                    logger.warning(f"   Labels clamped to valid range [0, {vocab_size - 1}]")
 
         with get_autocast_context(self.config):
             outputs = self.model(
