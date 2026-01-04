@@ -223,6 +223,9 @@ class Stage3Trainer:
         attention_mask = batch['attention_mask'].to(self.device)
         labels = batch['labels'].to(self.device)
         robot_targets = batch['robot_target'].to(self.device)
+        multi_robot_targets = batch.get('multi_robot_target')
+        if multi_robot_targets is not None:
+            multi_robot_targets = multi_robot_targets.to(self.device)
 
         # CRITICAL: Validate input_ids and labels are within embedding bounds before forward pass
         # This prevents cryptic CUDA index out of bounds errors
@@ -275,6 +278,31 @@ class Stage3Trainer:
                     )
                     logger.warning(f"   Labels clamped to valid range [0, {vocab_size - 1}]")
 
+        # Clamp robot targets to valid range to avoid gather OOB in losses
+        num_robots = getattr(model_ref.config, 'num_robots', None)
+        if num_robots is not None:
+            if robot_targets is not None:
+                max_robot = robot_targets.max().item()
+                min_robot = robot_targets.min().item()
+                if max_robot >= num_robots or min_robot < 0:
+                    logger.warning(
+                        f"⚠️ robot_target out of bounds detected (min={min_robot}, max={max_robot}, num_robots={num_robots}); clamping"
+                    )
+                    robot_targets = torch.clamp(robot_targets, 0, num_robots - 1)
+
+            if multi_robot_targets is not None:
+                # Ensure multi-hot vector width matches num_robots
+                if multi_robot_targets.size(-1) > num_robots:
+                    multi_robot_targets = multi_robot_targets[..., :num_robots]
+                elif multi_robot_targets.size(-1) < num_robots:
+                    pad_width = num_robots - multi_robot_targets.size(-1)
+                    pad_shape = list(multi_robot_targets.shape[:-1]) + [pad_width]
+                    pad_tensor = torch.zeros(pad_shape, device=multi_robot_targets.device, dtype=multi_robot_targets.dtype)
+                    multi_robot_targets = torch.cat([multi_robot_targets, pad_tensor], dim=-1)
+
+                # Clamp to [0,1]
+                multi_robot_targets = multi_robot_targets.clamp(0.0, 1.0)
+
         with get_autocast_context(self.config):
             outputs = self.model(
                 input_ids=input_ids,
@@ -284,6 +312,14 @@ class Stage3Trainer:
                 robot_targets=robot_targets,
                 return_reasoning=True,
             )
+
+            # Validate robot logits width matches num_robots
+            if num_robots is not None and 'robot_logits' in outputs:
+                if outputs['robot_logits'].shape[-1] != num_robots:
+                    logger.error(
+                        f"❌ robot_logits dim mismatch: got {outputs['robot_logits'].shape[-1]}, expected {num_robots}; trimming for safety"
+                    )
+                    outputs['robot_logits'] = outputs['robot_logits'][..., :num_robots]
 
             loss = outputs['loss']
 
@@ -417,6 +453,20 @@ class Stage3Trainer:
             if multi_robot_targets is not None:
                 multi_robot_targets = multi_robot_targets.to(self.device)
 
+            # Clamp targets during eval as well
+            num_robots = getattr(self.model.module.config if hasattr(self.model, 'module') else self.model.config, 'num_robots', None)
+            if num_robots is not None and robot_targets is not None:
+                robot_targets = torch.clamp(robot_targets, 0, num_robots - 1)
+                if multi_robot_targets is not None:
+                    if multi_robot_targets.size(-1) > num_robots:
+                        multi_robot_targets = multi_robot_targets[..., :num_robots]
+                    elif multi_robot_targets.size(-1) < num_robots:
+                        pad_width = num_robots - multi_robot_targets.size(-1)
+                        pad_shape = list(multi_robot_targets.shape[:-1]) + [pad_width]
+                        pad_tensor = torch.zeros(pad_shape, device=multi_robot_targets.device, dtype=multi_robot_targets.dtype)
+                        multi_robot_targets = torch.cat([multi_robot_targets, pad_tensor], dim=-1)
+                    multi_robot_targets = multi_robot_targets.clamp(0.0, 1.0)
+
             with get_autocast_context(self.config):
                 outputs = self.model(
                     input_ids=input_ids,
@@ -426,6 +476,9 @@ class Stage3Trainer:
                 )
 
                 if 'robot_logits' in outputs and robot_targets is not None:
+                    if num_robots is not None and outputs['robot_logits'].shape[-1] != num_robots:
+                        outputs['robot_logits'] = outputs['robot_logits'][..., :num_robots]
+
                     robot_preds = outputs['robot_logits'].argmax(dim=-1)
 
                     # Get confidence scores (softmax probabilities)
@@ -436,6 +489,8 @@ class Stage3Trainer:
                     multi_robot_preds = None
                     if 'multi_robot_logits' in outputs and multi_robot_targets is not None:
                         multi_robot_preds = torch.sigmoid(outputs['multi_robot_logits'])
+                        if multi_robot_preds.size(-1) > num_robots:
+                            multi_robot_preds = multi_robot_preds[..., :num_robots]
 
                     # Update comprehensive metrics
                     self.robot_metrics.update(
