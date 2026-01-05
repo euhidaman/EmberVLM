@@ -43,6 +43,14 @@ from embervlm.monitoring.carbon_tracker import CarbonTracker
 
 logger = logging.getLogger(__name__)
 
+# Try to import stage visualizer
+try:
+    from embervlm.monitoring.stage_visualizations import Stage1Visualizer
+    HAS_STAGE_VIZ = True
+except ImportError:
+    HAS_STAGE_VIZ = False
+    Stage1Visualizer = None
+
 
 class ContrastiveLoss(nn.Module):
     """Image-text contrastive loss (CLIP-style)."""
@@ -216,6 +224,21 @@ class Stage1Trainer:
         self.metric_tracker = MetricTracker()
         self.global_step = 0
 
+        # Stage 1 specific visualizer
+        self.stage_visualizer = None
+        if is_main_process() and HAS_STAGE_VIZ:
+            try:
+                self.stage_visualizer = Stage1Visualizer(
+                    output_dir=str(Path(config.output_dir) / 'visualizations')
+                )
+                logger.info("✓ Stage1Visualizer initialized")
+            except Exception as e:
+                logger.warning(f"Failed to initialize Stage1Visualizer: {e}")
+
+        # Store embeddings for visualization (updated each batch)
+        self.last_image_embeds = None
+        self.last_text_embeds = None
+
         # Print info
         if is_main_process():
             print_trainable_parameters(self.model)
@@ -304,6 +327,10 @@ class Stage1Trainer:
                 contrastive_loss, contrastive_metrics = self.contrastive_loss(
                     image_pooled, text_pooled
                 )
+
+                # Store embeddings for visualization (detach to avoid memory issues)
+                self.last_image_embeds = image_pooled.detach()
+                self.last_text_embeds = text_pooled.detach()
 
                 # Captioning loss (language modeling)
                 inputs_embeds, _ = model_ref.prepare_inputs_embeds(
@@ -409,6 +436,35 @@ class Stage1Trainer:
                                     self.wandb_logger.log_gradient_distribution(
                                         gradients, self.global_step, "stage1"
                                     )
+
+                            # Stage 1 specific visualizations every 500 steps
+                            if self.global_step % 500 == 0 and self.stage_visualizer is not None:
+                                try:
+                                    # Similarity matrix
+                                    if self.last_image_embeds is not None and self.last_text_embeds is not None:
+                                        _, sim_img = self.stage_visualizer.plot_similarity_matrix(
+                                            self.last_image_embeds,
+                                            self.last_text_embeds,
+                                            self.global_step
+                                        )
+                                        self.wandb_logger.log_image(
+                                            "stage1/similarity_matrix", sim_img, step=self.global_step
+                                        )
+                                        logger.info(f"✓ Logged similarity matrix at step {self.global_step}")
+
+                                        # t-SNE embedding visualization
+                                        _, tsne_img = self.stage_visualizer.plot_embedding_tsne(
+                                            self.last_image_embeds,
+                                            self.last_text_embeds,
+                                            self.global_step,
+                                            n_samples=min(100, self.last_image_embeds.size(0))
+                                        )
+                                        self.wandb_logger.log_image(
+                                            "stage1/embedding_tsne", tsne_img, step=self.global_step
+                                        )
+                                        logger.info(f"✓ Logged t-SNE visualization at step {self.global_step}")
+                                except Exception as e:
+                                    logger.warning(f"Failed to generate Stage 1 visualizations: {e}")
                         progress_bar.set_postfix({
                             'loss': f"{avg_metrics['loss']:.4f}",
                             'acc': f"{avg_metrics.get('acc_i2t', 0):.3f}",

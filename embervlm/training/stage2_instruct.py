@@ -41,6 +41,14 @@ from embervlm.monitoring.carbon_tracker import CarbonTracker
 
 logger = logging.getLogger(__name__)
 
+# Try to import stage visualizer
+try:
+    from embervlm.monitoring.stage_visualizations import Stage2Visualizer
+    HAS_STAGE_VIZ = True
+except ImportError:
+    HAS_STAGE_VIZ = False
+    Stage2Visualizer = None
+
 
 class DistillationLoss(nn.Module):
     """Knowledge distillation loss for teacher-student training."""
@@ -269,6 +277,21 @@ class Stage2Trainer:
         self.metric_tracker = MetricTracker()
         self.global_step = 0
 
+        # Stage 2 specific visualizer
+        self.stage_visualizer = None
+        if is_main_process() and HAS_STAGE_VIZ:
+            try:
+                self.stage_visualizer = Stage2Visualizer(
+                    output_dir=str(Path(config.output_dir) / 'visualizations')
+                )
+                logger.info("✓ Stage2Visualizer initialized")
+            except Exception as e:
+                logger.warning(f"Failed to initialize Stage2Visualizer: {e}")
+
+        # Track data for visualizations
+        self.last_logits = None
+        self.last_labels = None
+
         if is_main_process():
             print_trainable_parameters(self.model)
 
@@ -383,6 +406,10 @@ class Stage2Trainer:
             'distill_loss': distill_loss.item() if isinstance(distill_loss, torch.Tensor) else distill_loss,
         }
 
+        # Store for visualization (detach to avoid memory issues)
+        self.last_logits = outputs['logits'].detach()
+        self.last_labels = labels.detach()
+
         return loss, metrics
 
     def train_epoch(self, epoch: int):
@@ -461,6 +488,22 @@ class Stage2Trainer:
                                     self.wandb_logger.log_gradient_distribution(
                                         gradients, self.global_step, "stage2"
                                     )
+
+                            # Stage 2 specific visualizations
+                            if self.stage_visualizer is not None and self.last_logits is not None:
+                                try:
+                                    # Token probability distribution
+                                    _, prob_img = self.stage_visualizer.plot_token_probability_distribution(
+                                        self.last_logits,
+                                        self.last_labels,
+                                        self.global_step
+                                    )
+                                    self.wandb_logger.log_image(
+                                        "stage2/token_probabilities", prob_img, step=self.global_step
+                                    )
+                                    logger.info(f"✓ Logged token probability distribution at step {self.global_step}")
+                                except Exception as e:
+                                    logger.warning(f"Failed to generate Stage 2 visualizations: {e}")
 
                     self.metric_tracker.reset()
 

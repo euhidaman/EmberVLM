@@ -42,6 +42,14 @@ from embervlm.monitoring.carbon_tracker import CarbonTracker
 
 logger = logging.getLogger(__name__)
 
+# Try to import stage visualizer
+try:
+    from embervlm.monitoring.stage_visualizations import Stage3Visualizer
+    HAS_STAGE_VIZ = True
+except ImportError:
+    HAS_STAGE_VIZ = False
+    Stage3Visualizer = None
+
 
 class Stage3Trainer:
     """Trainer for Stage 3: Robot Fleet Selection."""
@@ -213,6 +221,22 @@ class Stage3Trainer:
         self.reasoning_metrics = ReasoningQualityMetrics()
         self.global_step = 0
 
+        # Stage 3 specific visualizer
+        self.stage_visualizer = None
+        if is_main_process() and HAS_STAGE_VIZ:
+            try:
+                self.stage_visualizer = Stage3Visualizer(
+                    output_dir=str(Path(config.output_dir) / 'visualizations')
+                )
+                logger.info("✓ Stage3Visualizer initialized")
+            except Exception as e:
+                logger.warning(f"Failed to initialize Stage3Visualizer: {e}")
+
+        # Track data for visualizations
+        self.last_robot_preds = None
+        self.last_robot_targets = None
+        self.last_confidences = None
+
         if is_main_process():
             print_trainable_parameters(self.model)
 
@@ -327,6 +351,11 @@ class Stage3Trainer:
             if 'robot_logits' in outputs:
                 robot_preds = outputs['robot_logits'].argmax(dim=-1)
                 robot_acc = (robot_preds == robot_targets).float().mean()
+
+                # Store for visualization
+                self.last_robot_preds = robot_preds.detach()
+                self.last_robot_targets = robot_targets.detach()
+                self.last_confidences = torch.softmax(outputs['robot_logits'], dim=-1).max(dim=-1)[0].detach()
             else:
                 robot_acc = torch.tensor(0.0)
 
@@ -409,6 +438,35 @@ class Stage3Trainer:
                                     self.wandb_logger.log_gradient_distribution(
                                         gradients, self.global_step, "stage3"
                                     )
+
+                                # Stage 3 specific visualizations
+                                if self.stage_visualizer is not None and self.last_robot_preds is not None:
+                                    try:
+                                        # Confusion matrix
+                                        _, cm_img = self.stage_visualizer.plot_confusion_matrix(
+                                            self.last_robot_preds,
+                                            self.last_robot_targets,
+                                            self.global_step
+                                        )
+                                        self.wandb_logger.log_image(
+                                            "stage3/confusion_matrix", cm_img, step=self.global_step
+                                        )
+                                        logger.info(f"✓ Logged confusion matrix at step {self.global_step}")
+
+                                        # Confidence calibration
+                                        if self.last_confidences is not None:
+                                            correct = (self.last_robot_preds == self.last_robot_targets)
+                                            _, cal_img = self.stage_visualizer.plot_confidence_calibration(
+                                                self.last_confidences,
+                                                correct,
+                                                self.global_step
+                                            )
+                                            self.wandb_logger.log_image(
+                                                "stage3/calibration", cal_img, step=self.global_step
+                                            )
+                                            logger.info(f"✓ Logged calibration plot at step {self.global_step}")
+                                    except Exception as e:
+                                        logger.warning(f"Failed to generate Stage 3 visualizations: {e}")
 
                         display_metrics = {k: f"{v:.4f}" for k, v in avg_metrics.items()
                                           if k != 'lr'}

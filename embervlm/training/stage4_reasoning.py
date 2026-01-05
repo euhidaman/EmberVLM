@@ -42,6 +42,14 @@ from embervlm.monitoring.carbon_tracker import CarbonTracker
 
 logger = logging.getLogger(__name__)
 
+# Try to import stage visualizer
+try:
+    from embervlm.monitoring.stage_visualizations import Stage4Visualizer
+    HAS_STAGE_VIZ = True
+except ImportError:
+    HAS_STAGE_VIZ = False
+    Stage4Visualizer = None
+
 
 class ReasoningConsistencyLoss(nn.Module):
     """Loss for ensuring consistent reasoning chains."""
@@ -155,6 +163,21 @@ class Stage4Trainer:
 
         self.metric_tracker = MetricTracker()
         self.global_step = 0
+
+        # Stage 4 specific visualizer
+        self.stage_visualizer = None
+        if is_main_process() and HAS_STAGE_VIZ:
+            try:
+                self.stage_visualizer = Stage4Visualizer(
+                    output_dir=str(Path(config.output_dir) / 'visualizations')
+                )
+                logger.info("✓ Stage4Visualizer initialized")
+            except Exception as e:
+                logger.warning(f"Failed to initialize Stage4Visualizer: {e}")
+
+        # Track metrics for phase comparison
+        self.phase1_metrics = {'loss': [], 'robot_accuracy': [], 'consistency_loss': []}
+        self.phase2_metrics = {'loss': [], 'robot_accuracy': [], 'consistency_loss': []}
 
     def _freeze_backbone(self):
         """Freeze backbone, only train reasoning heads."""
@@ -372,9 +395,32 @@ class Stage4Trainer:
                 if self.global_step % self.config.log_steps == 0:
                     avg_metrics = self.metric_tracker.get_average()
 
+                    # Track metrics for phase comparison
+                    phase_metrics = self.phase1_metrics if self.current_phase == 1 else self.phase2_metrics
+                    for key in ['loss', 'robot_accuracy', 'consistency_loss']:
+                        if key in avg_metrics:
+                            phase_metrics[key].append(avg_metrics[key])
+
                     if is_main_process():
                         if self.wandb_logger is not None:
                             self.wandb_logger.log(avg_metrics, step=self.global_step)
+
+                            # Stage 4 specific visualizations every 500 steps
+                            if self.global_step % 500 == 0 and self.stage_visualizer is not None:
+                                try:
+                                    # Phase comparison visualization
+                                    if len(self.phase1_metrics['loss']) >= 5 or len(self.phase2_metrics['loss']) >= 5:
+                                        _, phase_img = self.stage_visualizer.plot_phase_comparison(
+                                            self.phase1_metrics,
+                                            self.phase2_metrics,
+                                            self.global_step
+                                        )
+                                        self.wandb_logger.log_image(
+                                            "stage4/phase_comparison", phase_img, step=self.global_step
+                                        )
+                                        logger.info(f"✓ Logged phase comparison at step {self.global_step}")
+                                except Exception as e:
+                                    logger.warning(f"Failed to generate Stage 4 visualizations: {e}")
 
                         display = {k: f"{v:.4f}" for k, v in avg_metrics.items()
                                   if k not in ['lr', 'phase']}
