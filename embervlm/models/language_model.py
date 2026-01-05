@@ -671,7 +671,26 @@ class TinyLLMBackbone(nn.Module):
         self.model.set_input_embeddings(new_embeddings)
 
     def embed_tokens(self, input_ids: torch.LongTensor) -> torch.FloatTensor:
-        """Get token embeddings."""
+        """Get token embeddings with validation to prevent index out of bounds."""
+        vocab_size = self.model.transformer.wte.weight.shape[0]
+
+        # CRITICAL: Validate and clamp input_ids to prevent CUDA index out of bounds
+        max_token_id = input_ids.max().item()
+        min_token_id = input_ids.min().item()
+
+        if max_token_id >= vocab_size or min_token_id < 0:
+            import logging
+            logger = logging.getLogger(__name__)
+            if max_token_id >= vocab_size:
+                logger.warning(
+                    f"⚠️ TinyLLMBackbone.embed_tokens: Token ID {max_token_id} >= vocab_size {vocab_size}. Clamping."
+                )
+            if min_token_id < 0:
+                logger.warning(
+                    f"⚠️ TinyLLMBackbone.embed_tokens: Negative token ID {min_token_id}. Clamping."
+                )
+            input_ids = torch.clamp(input_ids, min=0, max=vocab_size - 1)
+
         return self.model.transformer.wte(input_ids)
 
     def forward(
@@ -889,6 +908,9 @@ class PretrainedTinyLLMBackbone(nn.Module):
         """Resize token embeddings for special tokens."""
         self.model.resize_token_embeddings(new_num_tokens)
         self.config.vocab_size = new_num_tokens
+        # Also update hf_config if it exists
+        if hasattr(self, 'hf_config'):
+            self.hf_config.vocab_size = new_num_tokens
 
     @property
     def device(self) -> torch.device:
