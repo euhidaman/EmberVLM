@@ -474,19 +474,31 @@ class Stage2Trainer:
                                 self.wandb_logger.log(avg_metrics, step=self.global_step)
 
                             # Stage 2 specific visualizations every 500 steps
-                            if self.global_step % 500 == 0 and self.stage_visualizer is not None:
-                                try:
+                            if self.global_step % 500 == 0:
+                                logger.info(f"[Stage2] Step {self.global_step}: Attempting visualizations...")
+                                logger.info(f"  stage_visualizer: {self.stage_visualizer is not None}")
+                                logger.info(f"  last_logits: {self.last_logits is not None}")
+                                logger.info(f"  last_labels: {self.last_labels is not None}")
+
+                                if self.stage_visualizer is not None:
                                     if self.last_logits is not None and self.last_labels is not None:
-                                        _, prob_img = self.stage_visualizer.plot_token_probability_distribution(
-                                            self.last_logits,
-                                            self.last_labels,
-                                            self.global_step
-                                        )
-                                        self.wandb_logger.log_image(
-                                            "stage2/token_probabilities", prob_img, step=self.global_step
-                                        )
-                                except Exception as e:
-                                    logger.warning(f"Failed to generate Stage 2 visualizations: {e}")
+                                        try:
+                                            logger.info(f"  Generating token probability distribution...")
+                                            _, prob_img = self.stage_visualizer.plot_token_probability_distribution(
+                                                self.last_logits,
+                                                self.last_labels,
+                                                self.global_step
+                                            )
+                                            self.wandb_logger.log_image(
+                                                "stage2/token_probabilities", prob_img, step=self.global_step
+                                            )
+                                            logger.info(f"  ✓ Logged token probability distribution to W&B")
+                                        except Exception as e:
+                                            logger.error(f"  ✗ Failed to generate Stage 2 visualizations: {e}", exc_info=True)
+                                    else:
+                                        logger.warning(f"  Skipping visualizations: logits/labels not available")
+                                else:
+                                    logger.warning(f"  Skipping visualizations: stage_visualizer is None")
 
                             # Gradient distribution every 500 steps
                             if self.global_step % 500 == 0 and hasattr(self.wandb_logger, 'log_gradient_distribution'):

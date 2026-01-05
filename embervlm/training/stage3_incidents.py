@@ -428,30 +428,45 @@ class Stage3Trainer:
                                 self.wandb_logger.log(avg_metrics, step=self.global_step)
 
                             # Stage 3 specific visualizations every 500 steps
-                            if self.global_step % 500 == 0 and self.stage_visualizer is not None:
-                                try:
-                                    if self.last_robot_preds is not None and self.last_robot_targets is not None:
-                                        _, cm_img = self.stage_visualizer.plot_confusion_matrix(
-                                            self.last_robot_preds,
-                                            self.last_robot_targets,
-                                            self.global_step
-                                        )
-                                        self.wandb_logger.log_image(
-                                            "stage3/confusion_matrix", cm_img, step=self.global_step
-                                        )
+                            if self.global_step % 500 == 0:
+                                logger.info(f"[Stage3] Step {self.global_step}: Attempting visualizations...")
+                                logger.info(f"  stage_visualizer: {self.stage_visualizer is not None}")
+                                logger.info(f"  last_robot_preds: {self.last_robot_preds is not None}")
+                                logger.info(f"  last_robot_targets: {self.last_robot_targets is not None}")
+                                logger.info(f"  last_confidences: {self.last_confidences is not None}")
 
-                                    if self.last_confidences is not None and self.last_robot_preds is not None:
-                                        correct = (self.last_robot_preds == self.last_robot_targets)
-                                        _, cal_img = self.stage_visualizer.plot_confidence_calibration(
-                                            self.last_confidences,
-                                            correct,
-                                            self.global_step
-                                        )
-                                        self.wandb_logger.log_image(
-                                            "stage3/calibration", cal_img, step=self.global_step
-                                        )
-                                except Exception as e:
-                                    logger.warning(f"Failed to generate Stage 3 visualizations: {e}")
+                                if self.stage_visualizer is not None:
+                                    if self.last_robot_preds is not None and self.last_robot_targets is not None:
+                                        try:
+                                            logger.info(f"  Generating confusion matrix...")
+                                            _, cm_img = self.stage_visualizer.plot_confusion_matrix(
+                                                self.last_robot_preds,
+                                                self.last_robot_targets,
+                                                self.global_step
+                                            )
+                                            self.wandb_logger.log_image(
+                                                "stage3/confusion_matrix", cm_img, step=self.global_step
+                                            )
+                                            logger.info(f"  ✓ Logged confusion matrix to W&B")
+
+                                            if self.last_confidences is not None:
+                                                logger.info(f"  Generating calibration plot...")
+                                                correct = (self.last_robot_preds == self.last_robot_targets)
+                                                _, cal_img = self.stage_visualizer.plot_confidence_calibration(
+                                                    self.last_confidences,
+                                                    correct,
+                                                    self.global_step
+                                                )
+                                                self.wandb_logger.log_image(
+                                                    "stage3/calibration", cal_img, step=self.global_step
+                                                )
+                                                logger.info(f"  ✓ Logged calibration plot to W&B")
+                                        except Exception as e:
+                                            logger.error(f"  ✗ Failed to generate Stage 3 visualizations: {e}", exc_info=True)
+                                    else:
+                                        logger.warning(f"  Skipping visualizations: predictions not available")
+                                else:
+                                    logger.warning(f"  Skipping visualizations: stage_visualizer is None")
 
                             # Gradient distribution every 500 steps
                             if self.global_step % 500 == 0 and hasattr(self.wandb_logger, 'log_gradient_distribution'):

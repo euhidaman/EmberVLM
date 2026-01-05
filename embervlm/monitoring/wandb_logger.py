@@ -169,6 +169,7 @@ class WandbLogger:
     ):
         """Log images to W&B."""
         if not self.enabled:
+            logger.warning(f"log_image called but W&B is not enabled, skipping {key}")
             return
 
         try:
@@ -181,8 +182,9 @@ class WandbLogger:
                 wandb_images = self.wandb.Image(images, caption=caption)
 
             self.wandb.log({key: wandb_images}, step=step)
+            logger.info(f"✓ W&B image logged: {key} at step {step}")
         except Exception as e:
-            logger.warning(f"Failed to log images: {e}")
+            logger.error(f"Failed to log image {key}: {e}", exc_info=True)
 
     def log_attention_map(
         self,
