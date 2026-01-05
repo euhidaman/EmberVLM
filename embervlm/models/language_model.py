@@ -361,6 +361,25 @@ class TinyLLM(nn.Module):
 
         if input_ids is not None:
             batch_size, seq_len = input_ids.size()
+
+            # CRITICAL: Validate and clamp input_ids before embedding lookup
+            vocab_size = self.wte.weight.shape[0]
+            max_token_id = input_ids.max().item()
+            min_token_id = input_ids.min().item()
+
+            if max_token_id >= vocab_size or min_token_id < 0:
+                import logging
+                logger = logging.getLogger(__name__)
+                if max_token_id >= vocab_size:
+                    logger.warning(
+                        f"⚠️ TinyLLM.forward: Token ID {max_token_id} >= vocab_size {vocab_size}. Clamping."
+                    )
+                if min_token_id < 0:
+                    logger.warning(
+                        f"⚠️ TinyLLM.forward: Negative token ID {min_token_id}. Clamping."
+                    )
+                input_ids = torch.clamp(input_ids, min=0, max=vocab_size - 1)
+
             inputs_embeds = self.wte(input_ids)
         elif inputs_embeds is not None:
             batch_size, seq_len, _ = inputs_embeds.size()
@@ -852,8 +871,28 @@ class PretrainedTinyLLMBackbone(nn.Module):
         self.model.set_input_embeddings(new_embeddings)
 
     def embed_tokens(self, input_ids: torch.LongTensor) -> torch.FloatTensor:
-        """Get token embeddings."""
-        return self.model.get_input_embeddings()(input_ids)
+        """Get token embeddings with validation to prevent index out of bounds."""
+        embedding_layer = self.model.get_input_embeddings()
+        vocab_size = embedding_layer.weight.shape[0]
+
+        # CRITICAL: Validate and clamp input_ids to prevent CUDA index out of bounds
+        max_token_id = input_ids.max().item()
+        min_token_id = input_ids.min().item()
+
+        if max_token_id >= vocab_size or min_token_id < 0:
+            import logging
+            logger = logging.getLogger(__name__)
+            if max_token_id >= vocab_size:
+                logger.warning(
+                    f"⚠️ PretrainedTinyLLMBackbone.embed_tokens: Token ID {max_token_id} >= vocab_size {vocab_size}. Clamping."
+                )
+            if min_token_id < 0:
+                logger.warning(
+                    f"⚠️ PretrainedTinyLLMBackbone.embed_tokens: Negative token ID {min_token_id}. Clamping."
+                )
+            input_ids = torch.clamp(input_ids, min=0, max=vocab_size - 1)
+
+        return embedding_layer(input_ids)
 
     def forward(
         self,
@@ -868,6 +907,52 @@ class PretrainedTinyLLMBackbone(nn.Module):
         **kwargs,  # Accept and ignore extra kwargs like return_dict
     ) -> Dict[str, torch.Tensor]:
         """Forward pass through the language model."""
+        # CRITICAL: Validate and clamp input_ids and labels to prevent CUDA index out of bounds
+        vocab_size = self.model.get_input_embeddings().weight.shape[0]
+
+        if input_ids is not None:
+            max_token_id = input_ids.max().item()
+            min_token_id = input_ids.min().item()
+
+            if max_token_id >= vocab_size or min_token_id < 0:
+                import logging
+                logger = logging.getLogger(__name__)
+                if max_token_id >= vocab_size:
+                    logger.warning(
+                        f"⚠️ PretrainedTinyLLMBackbone.forward: input_ids max {max_token_id} >= vocab_size {vocab_size}. Clamping."
+                    )
+                if min_token_id < 0:
+                    logger.warning(
+                        f"⚠️ PretrainedTinyLLMBackbone.forward: input_ids min {min_token_id} < 0. Clamping."
+                    )
+                input_ids = torch.clamp(input_ids, min=0, max=vocab_size - 1)
+
+        if labels is not None:
+            # Validate labels (skip -100 which is ignore index)
+            valid_mask = labels != -100
+            if valid_mask.any():
+                valid_labels = labels[valid_mask]
+                max_label = valid_labels.max().item()
+                min_label = valid_labels.min().item()
+
+                if max_label >= vocab_size or min_label < 0:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    if max_label >= vocab_size:
+                        logger.warning(
+                            f"⚠️ PretrainedTinyLLMBackbone.forward: labels max {max_label} >= vocab_size {vocab_size}. Clamping."
+                        )
+                    if min_label < 0:
+                        logger.warning(
+                            f"⚠️ PretrainedTinyLLMBackbone.forward: labels min {min_label} < 0. Clamping."
+                        )
+                    # Clamp labels: preserve -100, clamp everything else
+                    labels = torch.where(
+                        valid_mask,
+                        torch.clamp(labels, min=0, max=vocab_size - 1),
+                        labels
+                    )
+
         # Always request hidden states to get last_hidden_state
         outputs = self.model(
             input_ids=input_ids,

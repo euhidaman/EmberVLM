@@ -506,7 +506,7 @@ class EnhancedWandbLogger(WandbLogger):
             stage_name: Name of training stage
             commit: Whether to commit
         """
-        # Update history
+        # Update history for all numeric metrics
         for key, value in metrics.items():
             if isinstance(value, (int, float)):
                 if key not in self.metrics_history:
@@ -517,34 +517,57 @@ class EnhancedWandbLogger(WandbLogger):
         self.log(metrics, step=step, commit=False)
 
         # Generate visualizations periodically (only if visualizer is available)
-        # Require at least 10 samples (10 * 50 steps = 500 steps minimum)
-        if self.visualizer and step and step % 500 == 0 and len(self.metrics_history.get('loss', [])) >= 10:
+        # Check for any loss-like metric (loss, robot_loss, sft_loss, etc.)
+        loss_keys = [k for k in self.metrics_history.keys() if 'loss' in k.lower()]
+        has_enough_samples = any(len(self.metrics_history.get(k, [])) >= 10 for k in loss_keys)
+
+        if self.visualizer and step and step % 500 == 0 and has_enough_samples:
             try:
-                logger.info(f"Generating visualizations at step {step} with {len(self.metrics_history.get('loss', []))} loss samples")
+                # Find the primary loss metric
+                primary_loss_key = 'loss'
+                for candidate in ['loss', 'robot_loss', 'sft_loss', 'total_loss']:
+                    if candidate in self.metrics_history and len(self.metrics_history[candidate]) >= 10:
+                        primary_loss_key = candidate
+                        break
+
+                num_samples = len(self.metrics_history.get(primary_loss_key, []))
+                logger.info(f"[{stage_name}] Generating visualizations at step {step} with {num_samples} {primary_loss_key} samples")
 
                 # Loss decomposition plot
-                _, loss_img = self.visualizer.plot_loss_decomposition(
-                    self.metrics_history,
-                    stage_name,
-                    save_path=str(self.visualizer.output_dir / f"loss_decomp_step{step}.png")
-                )
-                self.log_image(f"{stage_name}/loss_decomposition", loss_img, step=step)
-                logger.info(f"Logged loss decomposition to W&B")
+                try:
+                    _, loss_img = self.visualizer.plot_loss_decomposition(
+                        self.metrics_history,
+                        stage_name,
+                        save_path=str(self.visualizer.output_dir / f"{stage_name}_loss_decomp_step{step}.png")
+                    )
+                    self.log_image(f"{stage_name}/loss_decomposition", loss_img, step=step)
+                    logger.info(f"✓ Logged loss decomposition to W&B for {stage_name}")
+                except Exception as e:
+                    logger.warning(f"Failed to generate loss decomposition for {stage_name}: {e}")
 
                 # Convergence analysis
-                _, conv_img = self.visualizer.plot_convergence_analysis(
-                    self.metrics_history,
-                    stage_name,
-                    save_path=str(self.visualizer.output_dir / f"convergence_step{step}.png")
-                )
-                self.log_image(f"{stage_name}/convergence_analysis", conv_img, step=step)
-                logger.info(f"Logged convergence analysis to W&B")
+                try:
+                    _, conv_img = self.visualizer.plot_convergence_analysis(
+                        self.metrics_history,
+                        stage_name,
+                        save_path=str(self.visualizer.output_dir / f"{stage_name}_convergence_step{step}.png")
+                    )
+                    self.log_image(f"{stage_name}/convergence_analysis", conv_img, step=step)
+                    logger.info(f"✓ Logged convergence analysis to W&B for {stage_name}")
+                except Exception as e:
+                    logger.warning(f"Failed to generate convergence analysis for {stage_name}: {e}")
+
+                # Log metrics summary
+                logger.info(f"[{stage_name}] Metrics tracked: {list(self.metrics_history.keys())}")
 
             except Exception as e:
-                logger.error(f"Failed to generate visualization: {e}", exc_info=True)
+                logger.error(f"Failed to generate visualization for {stage_name}: {e}", exc_info=True)
 
         if commit:
-            self.wandb.log({}, commit=True)
+            try:
+                self.wandb.log({}, commit=True)
+            except Exception as e:
+                logger.warning(f"Failed to commit W&B log: {e}")
 
     def log_attention_visualization(
         self,

@@ -155,25 +155,48 @@ class TrainingVisualizer:
         """
         fig, axes = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
 
-        # Filter loss components
-        loss_keys = [k for k in metrics_history.keys() if 'loss' in k.lower() and k != 'loss']
+        # Filter loss components (all keys containing 'loss')
+        all_loss_keys = [k for k in metrics_history.keys() if 'loss' in k.lower()]
+
+        # Find primary loss key
+        primary_loss_key = None
+        for candidate in ['loss', 'robot_loss', 'sft_loss', 'total_loss']:
+            if candidate in metrics_history and len(metrics_history[candidate]) > 0:
+                primary_loss_key = candidate
+                break
+        if primary_loss_key is None and all_loss_keys:
+            primary_loss_key = all_loss_keys[0]
+
+        # Component loss keys (excluding primary)
+        loss_keys = [k for k in all_loss_keys if k != primary_loss_key]
 
         # Plot 1: Stacked area chart of loss components
         if loss_keys:
-            steps = np.arange(len(metrics_history[loss_keys[0]]))
-            loss_data = np.array([metrics_history[k] for k in loss_keys])
+            # Use minimum length across all arrays
+            min_len = min(len(metrics_history[k]) for k in loss_keys)
+            steps = np.arange(min_len)
+            loss_data = np.array([metrics_history[k][:min_len] for k in loss_keys])
 
             axes[0].stackplot(steps, loss_data, labels=loss_keys, alpha=0.7)
             axes[0].set_ylabel('Loss Components')
             axes[0].set_title(f'{stage_name}: Loss Decomposition')
             axes[0].legend(loc='upper right', ncol=2)
             axes[0].grid(True, alpha=0.3)
-
-        # Plot 2: Total loss with trend
-        if 'loss' in metrics_history:
-            total_loss = metrics_history['loss']
+        elif primary_loss_key:
+            # If no components, just show the primary loss
+            total_loss = metrics_history[primary_loss_key]
             steps = np.arange(len(total_loss))
-            axes[1].plot(steps, total_loss, linewidth=2, label='Total Loss', color='#2E86AB')
+            axes[0].fill_between(steps, total_loss, alpha=0.7, label=primary_loss_key)
+            axes[0].set_ylabel('Loss')
+            axes[0].set_title(f'{stage_name}: Loss Progression')
+            axes[0].legend(loc='upper right')
+            axes[0].grid(True, alpha=0.3)
+
+        # Plot 2: Primary loss with trend
+        if primary_loss_key and primary_loss_key in metrics_history:
+            total_loss = metrics_history[primary_loss_key]
+            steps = np.arange(len(total_loss))
+            axes[1].plot(steps, total_loss, linewidth=2, label=primary_loss_key.replace('_', ' ').title(), color='#2E86AB')
 
             # Add moving average trend
             window = min(50, len(total_loss) // 10)
@@ -183,8 +206,8 @@ class TrainingVisualizer:
                            label=f'Trend (MA-{window})', color='#A23B72', alpha=0.8)
 
             axes[1].set_xlabel('Training Step')
-            axes[1].set_ylabel('Total Loss')
-            axes[1].set_title('Training Loss Progression')
+            axes[1].set_ylabel('Loss Value')
+            axes[1].set_title(f'{stage_name}: Training Loss Progression')
             axes[1].legend(loc='upper right')
             axes[1].grid(True, alpha=0.3)
 
@@ -360,12 +383,25 @@ class TrainingVisualizer:
         fig = plt.figure(figsize=(16, 10))
         gs = fig.add_gridspec(3, 2, hspace=0.3, wspace=0.3)
 
+        # Find primary loss key
+        primary_loss_key = None
+        for candidate in ['loss', 'robot_loss', 'sft_loss', 'total_loss']:
+            if candidate in metrics_history and len(metrics_history[candidate]) > 0:
+                primary_loss_key = candidate
+                break
+        if primary_loss_key is None:
+            loss_keys = [k for k in metrics_history.keys() if 'loss' in k.lower()]
+            if loss_keys:
+                primary_loss_key = loss_keys[0]
+
         # Plot 1: Loss and validation loss
         ax1 = fig.add_subplot(gs[0, :])
-        if 'loss' in metrics_history:
-            steps = np.arange(len(metrics_history['loss']))
-            ax1.plot(steps, metrics_history['loss'], label='Training Loss', linewidth=2)
-        if 'val_loss' in metrics_history:
+        steps = None
+        if primary_loss_key and primary_loss_key in metrics_history:
+            steps = np.arange(len(metrics_history[primary_loss_key]))
+            ax1.plot(steps, metrics_history[primary_loss_key],
+                    label=f'Training {primary_loss_key.replace("_", " ").title()}', linewidth=2)
+        if 'val_loss' in metrics_history and steps is not None:
             val_steps = np.linspace(0, len(steps)-1, len(metrics_history['val_loss']))
             ax1.plot(val_steps, metrics_history['val_loss'],
                     label='Validation Loss', linewidth=2, marker='o', markersize=4)
@@ -384,7 +420,7 @@ class TrainingVisualizer:
             ax2.set_title('Learning Rate Schedule')
             ax2.grid(True, alpha=0.3)
 
-        # Plot 3: Gradient norm
+        # Plot 3: Gradient norm or other metrics
         ax3 = fig.add_subplot(gs[1, 1])
         if 'grad_norm' in metrics_history:
             ax3.plot(metrics_history['grad_norm'], linewidth=2, color='#2A9D8F')
@@ -392,12 +428,18 @@ class TrainingVisualizer:
             ax3.set_ylabel('Gradient Norm')
             ax3.set_title('Gradient Norm Evolution')
             ax3.grid(True, alpha=0.3)
+        elif 'robot_accuracy' in metrics_history:
+            ax3.plot(metrics_history['robot_accuracy'], linewidth=2, color='#2A9D8F')
+            ax3.set_xlabel('Step')
+            ax3.set_ylabel('Robot Accuracy')
+            ax3.set_title('Robot Selection Accuracy')
+            ax3.grid(True, alpha=0.3)
 
         # Plot 4: Accuracy metrics
         ax4 = fig.add_subplot(gs[2, 0])
         acc_keys = [k for k in metrics_history.keys() if 'acc' in k.lower()]
         for key in acc_keys[:3]:  # Limit to 3 for clarity
-            ax4.plot(metrics_history[key], label=key, linewidth=2, alpha=0.8)
+            ax4.plot(metrics_history[key], label=key.replace('_', ' ').title(), linewidth=2, alpha=0.8)
         if acc_keys:
             ax4.set_xlabel('Step')
             ax4.set_ylabel('Accuracy')
@@ -407,9 +449,9 @@ class TrainingVisualizer:
 
         # Plot 5: Loss variance (stability indicator)
         ax5 = fig.add_subplot(gs[2, 1])
-        if 'loss' in metrics_history and len(metrics_history['loss']) > 50:
+        if primary_loss_key and primary_loss_key in metrics_history and len(metrics_history[primary_loss_key]) > 50:
             window = 50
-            loss = np.array(metrics_history['loss'])
+            loss = np.array(metrics_history[primary_loss_key])
             rolling_var = np.array([
                 np.var(loss[max(0, i-window):i+1])
                 for i in range(len(loss))
