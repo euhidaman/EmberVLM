@@ -426,30 +426,44 @@ class Stage1Trainer:
                             else:
                                 self.wandb_logger.log(avg_metrics, step=self.global_step)
 
-                            # Stage 1 specific visualizations every 500 steps (even if no gradients)
-                            if self.global_step % 500 == 0 and self.stage_visualizer is not None:
-                                try:
-                                    if self.last_image_embeds is not None and self.last_text_embeds is not None:
-                                        _, sim_img = self.stage_visualizer.plot_similarity_matrix(
-                                            self.last_image_embeds,
-                                            self.last_text_embeds,
-                                            self.global_step
-                                        )
-                                        self.wandb_logger.log_image(
-                                            "stage1/similarity_matrix", sim_img, step=self.global_step
-                                        )
+                            # Stage 1 specific visualizations every 500 steps
+                            if self.global_step % 500 == 0:
+                                logger.info(f"[Stage1] Step {self.global_step}: Attempting visualizations...")
+                                logger.info(f"  stage_visualizer: {self.stage_visualizer is not None}")
+                                logger.info(f"  last_image_embeds: {self.last_image_embeds is not None}")
+                                logger.info(f"  last_text_embeds: {self.last_text_embeds is not None}")
 
-                                        _, tsne_img = self.stage_visualizer.plot_embedding_tsne(
-                                            self.last_image_embeds,
-                                            self.last_text_embeds,
-                                            self.global_step,
-                                            n_samples=min(100, self.last_image_embeds.size(0))
-                                        )
-                                        self.wandb_logger.log_image(
-                                            "stage1/embedding_tsne", tsne_img, step=self.global_step
-                                        )
-                                except Exception as e:
-                                    logger.warning(f"Failed to generate Stage 1 visualizations: {e}")
+                                if self.stage_visualizer is not None:
+                                    if self.last_image_embeds is not None and self.last_text_embeds is not None:
+                                        try:
+                                            logger.info(f"  Generating similarity matrix...")
+                                            _, sim_img = self.stage_visualizer.plot_similarity_matrix(
+                                                self.last_image_embeds,
+                                                self.last_text_embeds,
+                                                self.global_step
+                                            )
+                                            self.wandb_logger.log_image(
+                                                "stage1/similarity_matrix", sim_img, step=self.global_step
+                                            )
+                                            logger.info(f"  ✓ Logged similarity matrix to W&B")
+
+                                            logger.info(f"  Generating t-SNE...")
+                                            _, tsne_img = self.stage_visualizer.plot_embedding_tsne(
+                                                self.last_image_embeds,
+                                                self.last_text_embeds,
+                                                self.global_step,
+                                                n_samples=min(100, self.last_image_embeds.size(0))
+                                            )
+                                            self.wandb_logger.log_image(
+                                                "stage1/embedding_tsne", tsne_img, step=self.global_step
+                                            )
+                                            logger.info(f"  ✓ Logged t-SNE to W&B")
+                                        except Exception as e:
+                                            logger.error(f"  ✗ Failed to generate Stage 1 visualizations: {e}", exc_info=True)
+                                    else:
+                                        logger.warning(f"  Skipping visualizations: embeddings not available")
+                                else:
+                                    logger.warning(f"  Skipping visualizations: stage_visualizer is None")
 
                             # Gradient distribution every 500 steps
                             if self.global_step % 500 == 0 and hasattr(self.wandb_logger, 'log_gradient_distribution'):
