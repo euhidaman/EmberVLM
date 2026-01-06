@@ -347,6 +347,184 @@ def unwrap_model(model: nn.Module) -> nn.Module:
     return model
 
 
+def force_rebuild_embeddings(
+    model: nn.Module,
+    new_vocab_size: int,
+    device: torch.device = None,
+    logger: logging.Logger = None,
+) -> nn.Module:
+    """
+    Force complete reconstruction of embedding layers to fix CUDA memory issues.
+
+    This function creates brand new embedding and lm_head layers with fresh CUDA
+    memory allocation, rather than relying on resize_token_embeddings which may
+    leave stale CUDA state.
+
+    Args:
+        model: The EmberVLM model (unwrapped from DDP)
+        new_vocab_size: Target vocabulary size
+        device: Target device (if None, uses CPU for safe reconstruction)
+        logger: Logger for status messages
+
+    Returns:
+        Model with reconstructed embedding layers
+    """
+    if logger is None:
+        logger = logging.getLogger(__name__)
+
+    # Move model to CPU for safe memory operations
+    original_device = next(model.parameters()).device
+    model = model.cpu()
+    torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+    logger.info(f"🔧 Force rebuilding embeddings to size {new_vocab_size}...")
+
+    # Find the language model and its embedding layer
+    lang_model = None
+    embed_layer = None
+    embed_attr_path = None
+
+    if hasattr(model, 'language_model'):
+        lang_model = model.language_model
+
+        # Check for HuggingFace-style model (PretrainedTinyLLMBackbone)
+        if hasattr(lang_model, 'model'):
+            inner_model = lang_model.model
+
+            # GPT-2 style: transformer.wte
+            if hasattr(inner_model, 'transformer') and hasattr(inner_model.transformer, 'wte'):
+                embed_layer = inner_model.transformer.wte
+                embed_attr_path = 'language_model.model.transformer.wte'
+            # Generic: get_input_embeddings
+            elif hasattr(inner_model, 'get_input_embeddings'):
+                embed_layer = inner_model.get_input_embeddings()
+                embed_attr_path = 'language_model.model (via get_input_embeddings)'
+
+        # Check for custom TinyLLMBackbone
+        elif hasattr(lang_model, 'model') and hasattr(lang_model.model, 'transformer'):
+            if hasattr(lang_model.model.transformer, 'wte'):
+                embed_layer = lang_model.model.transformer.wte
+                embed_attr_path = 'language_model.model.transformer.wte'
+
+        # Direct embedding access
+        elif hasattr(lang_model, 'get_input_embeddings'):
+            embed_layer = lang_model.get_input_embeddings()
+            embed_attr_path = 'language_model (via get_input_embeddings)'
+
+    if embed_layer is None:
+        raise RuntimeError("Could not find embedding layer in model")
+
+    logger.info(f"  Found embedding layer at: {embed_attr_path}")
+
+    # Get current embedding properties
+    old_vocab_size = embed_layer.weight.shape[0]
+    embed_dim = embed_layer.weight.shape[1]
+    old_weights = embed_layer.weight.data.clone()
+
+    logger.info(f"  Current embedding: vocab_size={old_vocab_size}, embed_dim={embed_dim}")
+    logger.info(f"  Target embedding: vocab_size={new_vocab_size}, embed_dim={embed_dim}")
+
+    # Create brand new embedding layer
+    new_embed = nn.Embedding(new_vocab_size, embed_dim)
+
+    # Initialize with small random values
+    nn.init.normal_(new_embed.weight, mean=0.0, std=0.02)
+
+    # Copy old weights
+    copy_size = min(old_vocab_size, new_vocab_size)
+    with torch.no_grad():
+        new_embed.weight[:copy_size] = old_weights[:copy_size]
+
+    logger.info(f"  ✓ Created new embedding layer, copied {copy_size} token embeddings")
+
+    # Replace the embedding layer
+    if hasattr(model.language_model, 'model'):
+        inner_model = model.language_model.model
+
+        if hasattr(inner_model, 'transformer') and hasattr(inner_model.transformer, 'wte'):
+            inner_model.transformer.wte = new_embed
+            logger.info(f"  ✓ Replaced transformer.wte")
+
+        if hasattr(inner_model, 'set_input_embeddings'):
+            inner_model.set_input_embeddings(new_embed)
+            logger.info(f"  ✓ Called set_input_embeddings()")
+
+        # Also rebuild lm_head if it exists and is tied
+        if hasattr(inner_model, 'lm_head'):
+            old_lm_head = inner_model.lm_head
+            new_lm_head = nn.Linear(old_lm_head.in_features, new_vocab_size, bias=old_lm_head.bias is not None)
+
+            # Initialize
+            nn.init.normal_(new_lm_head.weight, mean=0.0, std=0.02)
+            if new_lm_head.bias is not None:
+                nn.init.zeros_(new_lm_head.bias)
+
+            # Copy old weights
+            with torch.no_grad():
+                copy_size_lm = min(old_lm_head.weight.shape[0], new_vocab_size)
+                new_lm_head.weight[:copy_size_lm] = old_lm_head.weight[:copy_size_lm]
+                if old_lm_head.bias is not None and new_lm_head.bias is not None:
+                    new_lm_head.bias[:copy_size_lm] = old_lm_head.bias[:copy_size_lm]
+
+            inner_model.lm_head = new_lm_head
+            logger.info(f"  ✓ Rebuilt lm_head to size {new_vocab_size}")
+
+        # Update config
+        if hasattr(inner_model, 'config'):
+            inner_model.config.vocab_size = new_vocab_size
+            logger.info(f"  ✓ Updated inner model config.vocab_size")
+
+    elif hasattr(model.language_model, 'set_input_embeddings'):
+        model.language_model.set_input_embeddings(new_embed)
+        logger.info(f"  ✓ Called language_model.set_input_embeddings()")
+
+    # Update language_model config
+    if hasattr(model.language_model, 'config'):
+        model.language_model.config.vocab_size = new_vocab_size
+        logger.info(f"  ✓ Updated language_model.config.vocab_size")
+
+    if hasattr(model.language_model, 'hf_config'):
+        model.language_model.hf_config.vocab_size = new_vocab_size
+        logger.info(f"  ✓ Updated language_model.hf_config.vocab_size")
+
+    # Update main model config
+    if hasattr(model, 'config'):
+        model.config.language_vocab_size = new_vocab_size
+        logger.info(f"  ✓ Updated model.config.language_vocab_size")
+
+    # Move to target device
+    target_device = device if device is not None else original_device
+    model = model.to(target_device)
+
+    # Force CUDA synchronization
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+
+    # Verify the rebuild worked
+    verify_embed = None
+    if hasattr(model.language_model, 'get_input_embeddings'):
+        verify_embed = model.language_model.get_input_embeddings()
+    elif hasattr(model.language_model, 'model'):
+        if hasattr(model.language_model.model, 'get_input_embeddings'):
+            verify_embed = model.language_model.model.get_input_embeddings()
+
+    if verify_embed is not None:
+        actual_size = verify_embed.weight.shape[0]
+        if actual_size != new_vocab_size:
+            raise RuntimeError(
+                f"Embedding rebuild verification failed! "
+                f"Expected {new_vocab_size}, got {actual_size}"
+            )
+        logger.info(f"  ✓ Verified embedding size: {actual_size}")
+
+    logger.info(f"✅ Embedding reconstruction complete on device {target_device}")
+
+    return model
+
+
 def save_checkpoint(
     model: nn.Module,
     optimizer: torch.optim.Optimizer,
