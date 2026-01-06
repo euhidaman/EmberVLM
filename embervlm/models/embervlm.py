@@ -550,22 +550,37 @@ class EmberVLM(nn.Module):
         self,
         pixel_values: torch.Tensor,
         robot_targets: Optional[torch.LongTensor] = None,
+        task_embeddings: Optional[torch.Tensor] = None,
         return_reasoning: bool = False,
     ) -> Dict[str, torch.Tensor]:
         """
-        Vision-only forward pass for robot selection (Stage 3).
+        Vision-based forward pass for robot selection (Stage 3).
 
-        This bypasses the language model entirely to avoid tokenization issues.
-        Uses only visual features for robot classification, which is appropriate
-        since robot selection is primarily a vision-based task.
+        This bypasses the language model's embedding lookup to avoid tokenization issues,
+        but still supports reasoning based on visual understanding.
+
+        The reasoning module will:
+        1. Analyze visual features from the scene
+        2. Apply chain-of-thought reasoning through ReasoningHead
+        3. Select appropriate robot through RobotSelectionHead
+        4. Generate action plan through ActionPlanningHead
 
         Args:
             pixel_values: Images [B, C, H, W]
             robot_targets: Target robot indices for classification loss
-            return_reasoning: Whether to return reasoning outputs
+            task_embeddings: Optional pre-computed task embeddings [B, seq_len, hidden_dim]
+                            (can be used to inject text context without tokenization)
+            return_reasoning: Whether to return reasoning chain outputs
 
         Returns:
-            Dictionary containing robot selection outputs and losses
+            Dictionary containing:
+            - robot_logits: Raw classification scores [B, num_robots]
+            - robot_probs: Softmax probabilities [B, num_robots]
+            - robot_confidence: Confidence score [B, 1]
+            - plan_steps: Action plan embeddings
+            - plan_coherence: Plan quality score
+            - reasoning_chain: (if return_reasoning=True) reasoning steps
+            - loss: Classification loss (if robot_targets provided)
         """
         batch_size = pixel_values.size(0)
         device = pixel_values.device
@@ -575,21 +590,31 @@ class EmberVLM(nn.Module):
         visual_tokens = vision_output['visual_tokens']  # [B, num_visual_tokens, vision_dim]
 
         # 2. Project visual tokens to language model dimension through fusion
+        # This preserves the learned visual-semantic alignment from Stages 1 & 2
         fused_visual = self.fuse_features(visual_tokens)  # [B, num_visual_tokens, language_hidden_size]
 
-        # 3. Create a simple attention mask for visual tokens only
-        attention_mask = torch.ones(
-            batch_size, fused_visual.size(1),
-            dtype=torch.long, device=device
-        )
+        # 3. Optionally combine with task embeddings for richer context
+        if task_embeddings is not None:
+            # Concatenate visual and task features for joint reasoning
+            combined_features = torch.cat([fused_visual, task_embeddings], dim=1)
+            seq_len = combined_features.size(1)
+        else:
+            combined_features = fused_visual
+            seq_len = fused_visual.size(1)
 
-        # 4. Pass through reasoning module for robot selection
-        # The reasoning module expects hidden states in language model dimension
+        # 4. Create attention mask
+        attention_mask = torch.ones(batch_size, seq_len, dtype=torch.long, device=device)
+
+        # 5. Pass through reasoning module for robot selection
+        # The reasoning module performs:
+        # - Chain-of-thought reasoning (ReasoningHead)
+        # - Robot selection (RobotSelectionHead)
+        # - Action planning (ActionPlanningHead)
         outputs = {}
 
         if self.config.reasoning_enabled:
             reasoning_outputs = self.reasoning_module(
-                fused_visual,  # Use fused visual features as "hidden states"
+                combined_features,
                 attention_mask=attention_mask,
                 generate_reasoning=return_reasoning,
                 select_robot=True,
@@ -618,12 +643,18 @@ class EmberVLM(nn.Module):
             outputs['loss'] = loss
         else:
             # Fallback: simple classification head on pooled visual features
-            pooled = fused_visual.mean(dim=1)  # [B, language_hidden_size]
-            robot_logits = nn.functional.linear(
-                pooled,
-                torch.randn(self.config.num_robots, self.config.language_hidden_size, device=device)
-            )
+            pooled = combined_features.mean(dim=1)  # [B, language_hidden_size]
+
+            # Use a proper learned projection instead of random
+            if not hasattr(self, '_fallback_classifier'):
+                self._fallback_classifier = nn.Linear(
+                    self.config.language_hidden_size,
+                    self.config.num_robots
+                ).to(device)
+
+            robot_logits = self._fallback_classifier(pooled)
             outputs['robot_logits'] = robot_logits
+            outputs['robot_probs'] = F.softmax(robot_logits, dim=-1)
             outputs['loss'] = None
 
             if robot_targets is not None:
