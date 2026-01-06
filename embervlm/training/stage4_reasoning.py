@@ -136,17 +136,29 @@ class Stage4Trainer:
         self.carbon_tracker = None
 
         if is_main_process():
-            logger.info("Initializing W&B logger (main process)...")
+            logger.info("Initializing Enhanced W&B logger (main process)...")
             try:
-                self.wandb_logger = WandbLogger(
+                from embervlm.monitoring.wandb_logger import EnhancedWandbLogger
+                self.wandb_logger = EnhancedWandbLogger(
                     project="embervlm",
                     name="stage4_reasoning",
                     config=config.to_dict(),
+                    output_dir=str(Path(config.output_dir) / 'visualizations'),
                 )
-                logger.info("W&B logger initialized")
+                logger.info("Enhanced W&B logger initialized with visualizations")
             except Exception as e:
-                logger.warning(f"Failed to initialize W&B logger: {e}")
-                self.wandb_logger = None
+                logger.warning(f"Failed to initialize Enhanced W&B logger: {e}")
+                # Fallback to basic logger
+                try:
+                    self.wandb_logger = WandbLogger(
+                        project="embervlm",
+                        name="stage4_reasoning",
+                        config=config.to_dict(),
+                    )
+                    logger.info("Basic W&B logger initialized")
+                except Exception as e2:
+                    logger.warning(f"Failed to initialize W&B logger: {e2}")
+                    self.wandb_logger = None
 
             try:
                 self.carbon_tracker = CarbonTracker(output_dir=config.output_dir)
@@ -403,24 +415,47 @@ class Stage4Trainer:
 
                     if is_main_process():
                         if self.wandb_logger is not None:
-                            self.wandb_logger.log(avg_metrics, step=self.global_step)
+                            # Use enhanced logging if available
+                            if hasattr(self.wandb_logger, 'log_with_visualization'):
+                                self.wandb_logger.log_with_visualization(
+                                    avg_metrics,
+                                    step=self.global_step,
+                                    stage_name="stage4",
+                                )
+                            else:
+                                self.wandb_logger.log(avg_metrics, step=self.global_step)
 
                             # Stage 4 specific visualizations every 500 steps
-                            if self.global_step % 500 == 0 and self.stage_visualizer is not None:
-                                try:
-                                    # Phase comparison visualization
-                                    if len(self.phase1_metrics['loss']) >= 5 or len(self.phase2_metrics['loss']) >= 5:
-                                        _, phase_img = self.stage_visualizer.plot_phase_comparison(
-                                            self.phase1_metrics,
-                                            self.phase2_metrics,
-                                            self.global_step
+                            if self.global_step % 500 == 0:
+                                logger.info(f"[Stage4] Step {self.global_step}: Attempting visualizations...")
+
+                                if self.stage_visualizer is not None:
+                                    try:
+                                        # Phase comparison visualization
+                                        if len(self.phase1_metrics['loss']) >= 5 or len(self.phase2_metrics['loss']) >= 5:
+                                            logger.info(f"  Generating phase comparison...")
+                                            _, phase_img = self.stage_visualizer.plot_phase_comparison(
+                                                self.phase1_metrics,
+                                                self.phase2_metrics,
+                                                self.global_step
+                                            )
+                                            self.wandb_logger.log_image(
+                                                "stage4/phase_comparison", phase_img, step=self.global_step
+                                            )
+                                            logger.info(f"  ✓ Logged phase comparison to W&B")
+                                    except Exception as e:
+                                        logger.error(f"  ✗ Failed to generate Stage 4 visualizations: {e}", exc_info=True)
+
+                                # Gradient distribution every 500 steps
+                                if hasattr(self.wandb_logger, 'log_gradient_distribution'):
+                                    gradients = {}
+                                    for name, param in self.model.named_parameters():
+                                        if param.grad is not None and param.requires_grad:
+                                            gradients[name.split('.')[-1]] = param.grad
+                                    if gradients:
+                                        self.wandb_logger.log_gradient_distribution(
+                                            gradients, self.global_step, "stage4"
                                         )
-                                        self.wandb_logger.log_image(
-                                            "stage4/phase_comparison", phase_img, step=self.global_step
-                                        )
-                                        logger.info(f"✓ Logged phase comparison at step {self.global_step}")
-                                except Exception as e:
-                                    logger.warning(f"Failed to generate Stage 4 visualizations: {e}")
 
                         display = {k: f"{v:.4f}" for k, v in avg_metrics.items()
                                   if k not in ['lr', 'phase']}

@@ -525,6 +525,93 @@ def force_rebuild_embeddings(
     return model
 
 
+def validate_tensor_bounds(
+    input_ids: torch.Tensor,
+    labels: torch.Tensor,
+    vocab_size: int,
+    logger_instance: logging.Logger = None,
+    clamp: bool = True,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Validate and optionally clamp input_ids and labels to be within vocabulary bounds.
+
+    This is a failsafe utility to prevent CUDA index out-of-bounds errors.
+    Should be called before any embedding lookup operation.
+
+    Args:
+        input_ids: Token IDs tensor
+        labels: Labels tensor (may contain -100 for ignore)
+        vocab_size: Maximum valid token ID + 1
+        logger_instance: Logger for warnings
+        clamp: Whether to clamp out-of-bounds values (True) or raise error (False)
+
+    Returns:
+        Tuple of (validated_input_ids, validated_labels)
+    """
+    if logger_instance is None:
+        logger_instance = logger
+
+    modified = False
+
+    # Validate input_ids
+    if input_ids is not None:
+        max_token_id = input_ids.max().item()
+        min_token_id = input_ids.min().item()
+
+        if max_token_id >= vocab_size:
+            msg = f"input_ids max={max_token_id} >= vocab_size={vocab_size}"
+            if clamp:
+                logger_instance.warning(f"⚠️ {msg} - Clamping to valid range")
+                input_ids = torch.clamp(input_ids, max=vocab_size - 1)
+                modified = True
+            else:
+                raise ValueError(f"❌ CRITICAL: {msg}")
+
+        if min_token_id < 0:
+            msg = f"input_ids min={min_token_id} < 0"
+            if clamp:
+                logger_instance.warning(f"⚠️ {msg} - Clamping to valid range")
+                input_ids = torch.clamp(input_ids, min=0)
+                modified = True
+            else:
+                raise ValueError(f"❌ CRITICAL: {msg}")
+
+    # Validate labels (preserve -100 ignore index)
+    if labels is not None:
+        valid_labels_mask = labels != -100
+        if valid_labels_mask.any():
+            valid_labels = labels[valid_labels_mask]
+            max_label = valid_labels.max().item()
+            min_label = valid_labels.min().item()
+
+            if max_label >= vocab_size or min_label < 0:
+                if clamp:
+                    if max_label >= vocab_size:
+                        logger_instance.warning(
+                            f"⚠️ labels max={max_label} >= vocab_size={vocab_size} - Clamping"
+                        )
+                    if min_label < 0:
+                        logger_instance.warning(
+                            f"⚠️ labels min={min_label} < 0 - Clamping"
+                        )
+                    labels = torch.where(
+                        valid_labels_mask,
+                        torch.clamp(labels, min=0, max=vocab_size - 1),
+                        labels
+                    )
+                    modified = True
+                else:
+                    raise ValueError(
+                        f"❌ CRITICAL: labels out of bounds "
+                        f"(min={min_label}, max={max_label}, vocab_size={vocab_size})"
+                    )
+
+    if modified:
+        logger_instance.debug(f"Tensors validated and clamped to range [0, {vocab_size - 1}]")
+
+    return input_ids, labels
+
+
 def save_checkpoint(
     model: nn.Module,
     optimizer: torch.optim.Optimizer,
