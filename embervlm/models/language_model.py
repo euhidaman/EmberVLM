@@ -513,6 +513,35 @@ class TinyLLMForCausalLM(nn.Module):
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
 
+            # CRITICAL FIX: Validate labels before cross_entropy to prevent CUDA index out of bounds
+            # This is the ACTUAL location where the gather operation occurs that causes the crash
+            vocab_size = shift_logits.size(-1)
+
+            # Flatten for validation
+            flat_labels = shift_labels.view(-1)
+
+            # Check for invalid labels (excluding -100 ignore index)
+            valid_mask = flat_labels != -100
+            if valid_mask.any():
+                valid_labels = flat_labels[valid_mask]
+                max_label = valid_labels.max().item()
+                min_label = valid_labels.min().item()
+
+                if max_label >= vocab_size or min_label < 0:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.error(
+                        f"❌ CRITICAL in TinyLLMForCausalLM: Labels out of bounds! "
+                        f"max={max_label}, min={min_label}, vocab_size={vocab_size}. Clamping to prevent crash."
+                    )
+                    # Clamp the flattened shift_labels: preserve -100, clamp rest to valid range
+                    flat_labels = torch.where(
+                        valid_mask,
+                        torch.clamp(flat_labels, min=0, max=vocab_size - 1),
+                        flat_labels
+                    )
+                    shift_labels = flat_labels.view(shift_labels.shape)
+
             loss = F.cross_entropy(
                 shift_logits.view(-1, shift_logits.size(-1)),
                 shift_labels.view(-1),
@@ -972,12 +1001,18 @@ class PretrainedTinyLLMBackbone(nn.Module):
                         labels
                     )
 
+        # CRITICAL FIX: Compute loss ourselves instead of letting HuggingFace do it
+        # This ensures proper validation right before cross_entropy
+        compute_loss_ourselves = labels is not None
+        labels_for_loss = labels  # Save for later
+
         # Always request hidden states to get last_hidden_state
+        # Pass labels=None to HuggingFace model, we'll compute loss ourselves
         outputs = self.model(
             input_ids=input_ids,
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
-            labels=labels,
+            labels=None,  # Don't let HF compute loss - we do it ourselves with validation
             past_key_values=past_key_values,
             use_cache=use_cache,
             output_attentions=output_attentions,
@@ -985,9 +1020,48 @@ class PretrainedTinyLLMBackbone(nn.Module):
             return_dict=True,
         )
 
+        # Compute loss ourselves with proper validation
+        loss = None
+        if compute_loss_ourselves and labels_for_loss is not None:
+            logits = outputs.logits
+
+            # Shift for causal LM
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels_for_loss[..., 1:].contiguous()
+
+            # CRITICAL: Final validation right before cross_entropy
+            actual_vocab_size = shift_logits.size(-1)
+            flat_labels = shift_labels.view(-1)
+            valid_mask = flat_labels != -100
+
+            if valid_mask.any():
+                valid_labels = flat_labels[valid_mask]
+                max_label = valid_labels.max().item()
+                min_label = valid_labels.min().item()
+
+                if max_label >= actual_vocab_size or min_label < 0:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.error(
+                        f"❌ CRITICAL in PretrainedTinyLLMBackbone loss computation: "
+                        f"max={max_label}, min={min_label}, logits_vocab={actual_vocab_size}. Clamping."
+                    )
+                    flat_labels = torch.where(
+                        valid_mask,
+                        torch.clamp(flat_labels, min=0, max=actual_vocab_size - 1),
+                        flat_labels
+                    )
+                    shift_labels = flat_labels.view(shift_labels.shape)
+
+            loss = F.cross_entropy(
+                shift_logits.view(-1, actual_vocab_size),
+                shift_labels.view(-1),
+                ignore_index=-100,
+            )
+
         # Convert to dict format compatible with rest of EmberVLM
         return {
-            'loss': outputs.loss,
+            'loss': loss,
             'logits': outputs.logits,
             'past_key_values': outputs.past_key_values,
             'hidden_states': outputs.hidden_states if output_hidden_states else None,

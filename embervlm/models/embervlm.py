@@ -546,6 +546,91 @@ class EmberVLM(nn.Module):
 
         return outputs
 
+    def forward_vision_only(
+        self,
+        pixel_values: torch.Tensor,
+        robot_targets: Optional[torch.LongTensor] = None,
+        return_reasoning: bool = False,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Vision-only forward pass for robot selection (Stage 3).
+
+        This bypasses the language model entirely to avoid tokenization issues.
+        Uses only visual features for robot classification, which is appropriate
+        since robot selection is primarily a vision-based task.
+
+        Args:
+            pixel_values: Images [B, C, H, W]
+            robot_targets: Target robot indices for classification loss
+            return_reasoning: Whether to return reasoning outputs
+
+        Returns:
+            Dictionary containing robot selection outputs and losses
+        """
+        batch_size = pixel_values.size(0)
+        device = pixel_values.device
+
+        # 1. Encode images through vision encoder
+        vision_output = self.encode_image(pixel_values)
+        visual_tokens = vision_output['visual_tokens']  # [B, num_visual_tokens, vision_dim]
+
+        # 2. Project visual tokens to language model dimension through fusion
+        fused_visual = self.fuse_features(visual_tokens)  # [B, num_visual_tokens, language_hidden_size]
+
+        # 3. Create a simple attention mask for visual tokens only
+        attention_mask = torch.ones(
+            batch_size, fused_visual.size(1),
+            dtype=torch.long, device=device
+        )
+
+        # 4. Pass through reasoning module for robot selection
+        # The reasoning module expects hidden states in language model dimension
+        outputs = {}
+
+        if self.config.reasoning_enabled:
+            reasoning_outputs = self.reasoning_module(
+                fused_visual,  # Use fused visual features as "hidden states"
+                attention_mask=attention_mask,
+                generate_reasoning=return_reasoning,
+                select_robot=True,
+                plan_actions=True,
+            )
+
+            outputs.update({
+                'robot_logits': reasoning_outputs.get('robot_logits'),
+                'robot_probs': reasoning_outputs.get('robot_probs'),
+                'robot_confidence': reasoning_outputs.get('robot_confidence'),
+                'plan_steps': reasoning_outputs.get('plan_steps'),
+                'plan_coherence': reasoning_outputs.get('plan_coherence'),
+            })
+
+            if return_reasoning and 'reasoning_chain' in reasoning_outputs:
+                outputs['reasoning_chain'] = reasoning_outputs['reasoning_chain']
+
+            # Compute robot selection loss
+            loss = None
+            if robot_targets is not None:
+                targets = {'robot_target': robot_targets}
+                reasoning_losses = self.reasoning_loss(reasoning_outputs, targets)
+                loss = reasoning_losses['total_loss']
+                outputs['reasoning_losses'] = reasoning_losses
+
+            outputs['loss'] = loss
+        else:
+            # Fallback: simple classification head on pooled visual features
+            pooled = fused_visual.mean(dim=1)  # [B, language_hidden_size]
+            robot_logits = nn.functional.linear(
+                pooled,
+                torch.randn(self.config.num_robots, self.config.language_hidden_size, device=device)
+            )
+            outputs['robot_logits'] = robot_logits
+            outputs['loss'] = None
+
+            if robot_targets is not None:
+                outputs['loss'] = F.cross_entropy(robot_logits, robot_targets)
+
+        return outputs
+
     @torch.no_grad()
     def generate(
         self,

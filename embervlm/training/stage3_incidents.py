@@ -303,15 +303,14 @@ class Stage3Trainer:
         return input_ids, labels
 
     def train_robot_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
-        """Training step for robot selection."""
-        pixel_values = batch['pixel_values'].to(self.device)
-        input_ids = batch['input_ids'].to(self.device)
-        attention_mask = batch['attention_mask'].to(self.device)
-        labels = batch['labels'].to(self.device)
-        robot_targets = batch['robot_target'].to(self.device)
+        """Training step for robot selection using vision-only forward pass.
 
-        # CRITICAL: Validate and fix tokens BEFORE model forward pass
-        input_ids, labels = self._validate_and_fix_tokens(input_ids, labels)
+        This uses forward_vision_only() which bypasses the language model entirely,
+        avoiding all tokenization-related CUDA index out of bounds errors.
+        Robot selection is primarily a vision-based task anyway.
+        """
+        pixel_values = batch['pixel_values'].to(self.device)
+        robot_targets = batch['robot_target'].to(self.device)
 
         multi_robot_targets = batch.get('multi_robot_target')
         if multi_robot_targets is not None:
@@ -319,7 +318,6 @@ class Stage3Trainer:
 
         # Get model reference for config access
         model_ref = self.model.module if hasattr(self.model, 'module') else self.model
-
 
         # Clamp robot targets to valid range to avoid gather OOB in losses
         num_robots = getattr(model_ref.config, 'num_robots', None)
@@ -347,11 +345,9 @@ class Stage3Trainer:
                 multi_robot_targets = multi_robot_targets.clamp(0.0, 1.0)
 
         with get_autocast_context(self.config):
-            outputs = self.model(
-                input_ids=input_ids,
+            # Use vision-only forward pass - bypasses language model entirely
+            outputs = self.model.forward_vision_only(
                 pixel_values=pixel_values,
-                attention_mask=attention_mask,
-                labels=labels,
                 robot_targets=robot_targets,
                 return_reasoning=True,
             )
