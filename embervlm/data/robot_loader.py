@@ -556,10 +556,11 @@ class EnhancedRobotSelectionDataset(Dataset):
                 'task_description': sample['task'],
             }
 
-        input_ids = encoding['input_ids'].squeeze(0)
-        attention_mask = encoding['attention_mask'].squeeze(0)
+        # Clone tensors immediately to avoid CUDA async issues
+        input_ids = encoding['input_ids'].squeeze(0).clone()
+        attention_mask = encoding['attention_mask'].squeeze(0).clone()
 
-        # CRITICAL FIX: Robust validation and clamping of token IDs
+        # CRITICAL FIX: Robust validation and fixing of token IDs
         # Get the actual vocabulary size from tokenizer
         vocab_size = self.tokenizer.vocab_size
         # Also check the full length including special tokens
@@ -568,38 +569,30 @@ class EnhancedRobotSelectionDataset(Dataset):
         # Use the larger of the two to be safe
         effective_vocab_size = max(vocab_size, full_vocab_size)
 
-        # Validate input_ids - check for out-of-bounds
-        max_token_id = input_ids.max().item()
-        min_token_id = input_ids.min().item()
+        # Check for invalid tokens (out of bounds or negative)
+        invalid_mask = (input_ids >= effective_vocab_size) | (input_ids < 0)
 
-        if max_token_id >= effective_vocab_size:
+        if invalid_mask.any():
+            max_token_id = input_ids.max().item()
+            min_token_id = input_ids.min().item()
+            num_invalid = invalid_mask.sum().item()
+
             # Log detailed information for debugging
             logger.warning(
-                f"⚠️ Token ID out of bounds! Max ID: {max_token_id}, "
-                f"vocab_size: {vocab_size}, full_vocab: {full_vocab_size}. "
-                f"Sample idx: {idx}. Clamping to {effective_vocab_size - 1}."
-            )
-            # Find which positions have out-of-bounds tokens
-            oob_mask = input_ids >= effective_vocab_size
-            oob_positions = oob_mask.nonzero(as_tuple=True)[0].tolist()[:5]  # First 5
-            oob_values = input_ids[oob_mask][:5].tolist()
-            logger.warning(f"   OOB positions (first 5): {oob_positions}")
-            logger.warning(f"   OOB values (first 5): {oob_values}")
-
-            # Clamp to valid range - use pad_token_id as replacement
-            pad_id = self.tokenizer.pad_token_id or 0
-            input_ids = torch.where(
-                input_ids >= effective_vocab_size,
-                torch.tensor(pad_id, dtype=input_ids.dtype),
-                input_ids
+                f"⚠️ {num_invalid} invalid token IDs! Range: [{min_token_id}, {max_token_id}], "
+                f"Valid: [0, {effective_vocab_size - 1}]. Sample idx: {idx}. Replacing with 0."
             )
 
-        # Check for negative token IDs
-        if min_token_id < 0:
-            logger.warning(f"⚠️ Negative token ID: {min_token_id}. Sample idx: {idx}. Clamping to 0.")
-            input_ids = torch.clamp(input_ids, min=0)
+            # Find which positions have invalid tokens (for debugging)
+            invalid_positions = invalid_mask.nonzero(as_tuple=True)[0].tolist()[:5]
+            invalid_values = input_ids[invalid_mask][:5].tolist()
+            logger.warning(f"   Invalid positions (first 5): {invalid_positions}")
+            logger.warning(f"   Invalid values (first 5): {invalid_values}")
 
-        # Labels for language modeling
+            # Replace invalid tokens with 0 (safer and more predictable)
+            input_ids = torch.where(invalid_mask, torch.zeros_like(input_ids), input_ids)
+
+        # Labels for language modeling - clone again for safety
         labels = input_ids.clone()
         pad_token_id = self.tokenizer.pad_token_id
         if pad_token_id is not None:
@@ -608,16 +601,12 @@ class EnhancedRobotSelectionDataset(Dataset):
         # Final validation: ensure labels are within vocab bounds (excluding -100)
         valid_labels_mask = labels != -100
         if valid_labels_mask.any():
-            valid_labels = labels[valid_labels_mask]
-            if valid_labels.max().item() >= effective_vocab_size or valid_labels.min().item() < 0:
+            invalid_labels = valid_labels_mask & ((labels >= effective_vocab_size) | (labels < 0))
+            if invalid_labels.any():
                 logger.warning(
-                    f"⚠️ Invalid label IDs detected. Clamping. Sample idx: {idx}"
+                    f"⚠️ Invalid label IDs detected. Replacing with 0. Sample idx: {idx}"
                 )
-                labels = torch.where(
-                    valid_labels_mask,
-                    torch.clamp(labels, min=0, max=effective_vocab_size - 1),
-                    labels
-                )
+                labels = torch.where(invalid_labels, torch.zeros_like(labels), labels)
 
         # Robot target (primary robot index)
         robot_target = ROBOT_MAPPING.get(sample['primary_robot'], 0)

@@ -257,40 +257,48 @@ class Stage3Trainer:
         """Validate and fix token IDs before model forward pass.
 
         This is a critical safeguard to prevent CUDA index out of bounds errors.
+        Uses .clone() to ensure we're working with fresh tensors that CUDA can't
+        have already queued operations on.
         """
         vocab_size = self._vocab_size
         device = input_ids.device
+
+        # CRITICAL: Clone tensors FIRST to avoid modifying originals and CUDA async issues
+        input_ids = input_ids.clone()
+        labels = labels.clone()
 
         # Check input_ids
         invalid_input_mask = (input_ids >= vocab_size) | (input_ids < 0)
         if invalid_input_mask.any():
             num_invalid = invalid_input_mask.sum().item()
+            max_id = input_ids.max().item()
+            min_id = input_ids.min().item()
             logger.warning(
                 f"⚠️ {num_invalid} invalid input_ids detected. "
-                f"Max: {input_ids.max().item()}, Min: {input_ids.min().item()}, "
-                f"Vocab: {vocab_size}. Replacing with 0."
+                f"Max: {max_id}, Min: {min_id}, Vocab: {vocab_size}. Replacing with 0."
             )
             input_ids = torch.where(invalid_input_mask, torch.zeros_like(input_ids), input_ids)
+
+            # Force CUDA sync after modification
+            if device.type == 'cuda':
+                torch.cuda.synchronize(device)
 
         # Check labels (skip -100 which is ignore index)
         valid_labels_mask = labels != -100
         if valid_labels_mask.any():
-            valid_labels = labels[valid_labels_mask]
-            invalid_label_mask = (valid_labels >= vocab_size) | (valid_labels < 0)
-            if invalid_label_mask.any():
-                num_invalid = invalid_label_mask.sum().item()
+            # Check only the valid (non -100) positions
+            invalid_label_positions = valid_labels_mask & ((labels >= vocab_size) | (labels < 0))
+            if invalid_label_positions.any():
+                num_invalid = invalid_label_positions.sum().item()
                 logger.warning(
-                    f"⚠️ {num_invalid} invalid labels detected. Clamping to valid range."
+                    f"⚠️ {num_invalid} invalid labels detected. Replacing with 0."
                 )
-                # Create fixed labels
-                fixed_labels = labels.clone()
-                # Only clamp the valid (non -100) labels
-                fixed_labels = torch.where(
-                    valid_labels_mask & ((labels >= vocab_size) | (labels < 0)),
-                    torch.clamp(labels, min=0, max=vocab_size - 1),
-                    labels
-                )
-                labels = fixed_labels
+                # Replace invalid labels with 0
+                labels = torch.where(invalid_label_positions, torch.zeros_like(labels), labels)
+
+                # Force CUDA sync after modification
+                if device.type == 'cuda':
+                    torch.cuda.synchronize(device)
 
         return input_ids, labels
 

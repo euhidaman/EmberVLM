@@ -693,22 +693,31 @@ class TinyLLMBackbone(nn.Module):
         """Get token embeddings with validation to prevent index out of bounds."""
         vocab_size = self.model.transformer.wte.weight.shape[0]
 
-        # CRITICAL: Validate and clamp input_ids to prevent CUDA index out of bounds
-        max_token_id = input_ids.max().item()
-        min_token_id = input_ids.min().item()
+        # CRITICAL: Create a clean copy and validate BEFORE any CUDA operations
+        input_ids = input_ids.clone()
 
-        if max_token_id >= vocab_size or min_token_id < 0:
+        # Check for out-of-bounds tokens
+        invalid_mask = (input_ids >= vocab_size) | (input_ids < 0)
+
+        if invalid_mask.any():
             import logging
             logger = logging.getLogger(__name__)
-            if max_token_id >= vocab_size:
-                logger.warning(
-                    f"⚠️ TinyLLMBackbone.embed_tokens: Token ID {max_token_id} >= vocab_size {vocab_size}. Clamping."
-                )
-            if min_token_id < 0:
-                logger.warning(
-                    f"⚠️ TinyLLMBackbone.embed_tokens: Negative token ID {min_token_id}. Clamping."
-                )
-            input_ids = torch.clamp(input_ids, min=0, max=vocab_size - 1)
+
+            max_token_id = input_ids.max().item()
+            min_token_id = input_ids.min().item()
+            num_invalid = invalid_mask.sum().item()
+
+            logger.warning(
+                f"⚠️ TinyLLMBackbone.embed_tokens: {num_invalid} invalid tokens. "
+                f"Range: [{min_token_id}, {max_token_id}], Valid: [0, {vocab_size - 1}]. Replacing with 0."
+            )
+
+            # Replace invalid tokens with 0
+            input_ids = torch.where(invalid_mask, torch.zeros_like(input_ids), input_ids)
+
+            # Force CUDA sync
+            if input_ids.is_cuda:
+                torch.cuda.synchronize(input_ids.device)
 
         return self.model.transformer.wte(input_ids)
 
@@ -875,22 +884,32 @@ class PretrainedTinyLLMBackbone(nn.Module):
         embedding_layer = self.model.get_input_embeddings()
         vocab_size = embedding_layer.weight.shape[0]
 
-        # CRITICAL: Validate and clamp input_ids to prevent CUDA index out of bounds
-        max_token_id = input_ids.max().item()
-        min_token_id = input_ids.min().item()
+        # CRITICAL: Create a clean copy and validate BEFORE any CUDA operations
+        # This prevents async CUDA execution from using the original invalid tensor
+        input_ids = input_ids.clone()
 
-        if max_token_id >= vocab_size or min_token_id < 0:
+        # Check for out-of-bounds tokens
+        invalid_mask = (input_ids >= vocab_size) | (input_ids < 0)
+
+        if invalid_mask.any():
             import logging
             logger = logging.getLogger(__name__)
-            if max_token_id >= vocab_size:
-                logger.warning(
-                    f"⚠️ PretrainedTinyLLMBackbone.embed_tokens: Token ID {max_token_id} >= vocab_size {vocab_size}. Clamping."
-                )
-            if min_token_id < 0:
-                logger.warning(
-                    f"⚠️ PretrainedTinyLLMBackbone.embed_tokens: Negative token ID {min_token_id}. Clamping."
-                )
-            input_ids = torch.clamp(input_ids, min=0, max=vocab_size - 1)
+
+            max_token_id = input_ids.max().item()
+            min_token_id = input_ids.min().item()
+            num_invalid = invalid_mask.sum().item()
+
+            logger.warning(
+                f"⚠️ PretrainedTinyLLMBackbone.embed_tokens: {num_invalid} invalid tokens. "
+                f"Range: [{min_token_id}, {max_token_id}], Valid: [0, {vocab_size - 1}]. Replacing with 0."
+            )
+
+            # Replace invalid tokens with 0 (safer than clamping at boundaries)
+            input_ids = torch.where(invalid_mask, torch.zeros_like(input_ids), input_ids)
+
+            # Force CUDA sync to ensure the fix is applied
+            if input_ids.is_cuda:
+                torch.cuda.synchronize(input_ids.device)
 
         return embedding_layer(input_ids)
 

@@ -282,8 +282,11 @@ class EmberVLM(nn.Module):
         batch_size, seq_len = input_ids.size()
         device = input_ids.device
 
-        # CRITICAL SAFEGUARD: Validate and fix input_ids BEFORE any embedding lookup
-        # The embedding lookup is synchronous on the tensor, so we must fix the tensor first
+        # CRITICAL: Clone input_ids FIRST to avoid modifying the original tensor
+        # This prevents issues with CUDA async execution
+        input_ids = input_ids.clone()
+
+        # Validate and fix input_ids BEFORE any embedding lookup
         vocab_size = self.language_model.get_input_embeddings().weight.shape[0]
 
         # Create a mask of invalid tokens (out of bounds)
@@ -301,12 +304,11 @@ class EmberVLM(nn.Module):
             logger.error(
                 f"❌ CRITICAL: {num_invalid} invalid token IDs detected! "
                 f"Range: [{min_token_id}, {max_token_id}], Valid: [0, {vocab_size - 1}]. "
-                f"Replacing with pad token to prevent CUDA crash."
+                f"Replacing with 0 to prevent CUDA crash."
             )
 
-            # Replace invalid tokens with pad token (safer than clamping)
-            pad_token_id = getattr(self.language_model.config, 'pad_token_id', 0) or 0
-            input_ids = torch.where(invalid_mask, torch.tensor(pad_token_id, device=device, dtype=input_ids.dtype), input_ids)
+            # Replace invalid tokens with 0 (safer than pad token which might not exist)
+            input_ids = torch.where(invalid_mask, torch.zeros_like(input_ids), input_ids)
 
             # Force synchronization to ensure the fix is applied before embedding lookup
             if device.type == 'cuda':
