@@ -481,7 +481,11 @@ class EnhancedRobotSelectionDataset(Dataset):
         return img
 
     def _format_prompt(self, sample: Dict) -> str:
-        """Format training prompt with reasoning chain."""
+        """Format training prompt with reasoning chain.
+
+        Uses standard text markers instead of special tokens to avoid
+        tokenizer/embedding size mismatches that cause CUDA index errors.
+        """
         parts = []
 
         # Instruction
@@ -496,15 +500,16 @@ class EnhancedRobotSelectionDataset(Dataset):
             for i, subtask in enumerate(sample['subtasks'][:3]):  # Show first 3
                 parts.append(f"  {i+1}. {subtask['subtask']} (Order: {subtask['execution_order']})")
 
-        # Reasoning chain
+        # Reasoning chain - use XML-style tags that tokenize as regular subwords
+        # This avoids special token ID mismatches that cause CUDA index errors
         if self.include_reasoning and sample['reasoning']:
-            parts.append("\n<|reasoning_start|>")
+            parts.append("\n[REASONING]")
             for i, step in enumerate(sample['reasoning'], 1):
                 parts.append(f"Step {i}: {step}")
-            parts.append("<|reasoning_end|>")
+            parts.append("[/REASONING]")
 
-        # Robot selection
-        parts.append(f"\n<|robot_selection|>{sample['primary_robot']}")
+        # Robot selection - use simple text format
+        parts.append(f"\n[ROBOT] {sample['primary_robot']} [/ROBOT]")
 
         # For multi-robot, list all assigned robots
         if sample['type'] == 'multi' and len(sample['all_robots']) > 1:
@@ -525,53 +530,92 @@ class EnhancedRobotSelectionDataset(Dataset):
         # Create prompt
         text = self._format_prompt(sample)
 
-        # Tokenize
-        encoding = self.tokenizer(
-            text,
-            max_length=self.max_length,
-            padding='max_length',
-            truncation=True,
-            return_tensors='pt',
-        )
+        # Tokenize with explicit handling to prevent out-of-bounds issues
+        try:
+            encoding = self.tokenizer(
+                text,
+                max_length=self.max_length,
+                padding='max_length',
+                truncation=True,
+                return_tensors='pt',
+            )
+        except Exception as e:
+            logger.error(f"Tokenization failed for sample {idx}: {e}")
+            # Return a safe dummy sample
+            dummy_input_ids = torch.zeros(self.max_length, dtype=torch.long)
+            dummy_input_ids[0] = self.tokenizer.bos_token_id or 0
+            return {
+                'pixel_values': pixel_values,
+                'input_ids': dummy_input_ids,
+                'attention_mask': torch.ones(self.max_length, dtype=torch.long),
+                'labels': torch.full((self.max_length,), -100, dtype=torch.long),
+                'robot_target': torch.tensor(0, dtype=torch.long),
+                'multi_robot_target': torch.zeros(NUM_ROBOTS),
+                'is_multi_robot': torch.tensor(0.0),
+                'difficulty': 'easy',
+                'task_description': sample['task'],
+            }
 
         input_ids = encoding['input_ids'].squeeze(0)
         attention_mask = encoding['attention_mask'].squeeze(0)
 
-        # CRITICAL FIX: Validate and clamp token IDs to prevent CUDA index errors
-        # This catches cases where tokenizer produces out-of-bounds IDs
-        vocab_size = len(self.tokenizer)
+        # CRITICAL FIX: Robust validation and clamping of token IDs
+        # Get the actual vocabulary size from tokenizer
+        vocab_size = self.tokenizer.vocab_size
+        # Also check the full length including special tokens
+        full_vocab_size = len(self.tokenizer)
+
+        # Use the larger of the two to be safe
+        effective_vocab_size = max(vocab_size, full_vocab_size)
 
         # Validate input_ids - check for out-of-bounds
         max_token_id = input_ids.max().item()
         min_token_id = input_ids.min().item()
 
-        if max_token_id >= vocab_size:
+        if max_token_id >= effective_vocab_size:
+            # Log detailed information for debugging
             logger.warning(
-                f"⚠️ Token ID out of bounds detected! Max ID: {max_token_id}, Vocab size: {vocab_size}. "
-                f"Clamping to valid range. Sample idx: {idx}"
+                f"⚠️ Token ID out of bounds! Max ID: {max_token_id}, "
+                f"vocab_size: {vocab_size}, full_vocab: {full_vocab_size}. "
+                f"Sample idx: {idx}. Clamping to {effective_vocab_size - 1}."
             )
-            input_ids = torch.clamp(input_ids, max=vocab_size - 1)
+            # Find which positions have out-of-bounds tokens
+            oob_mask = input_ids >= effective_vocab_size
+            oob_positions = oob_mask.nonzero(as_tuple=True)[0].tolist()[:5]  # First 5
+            oob_values = input_ids[oob_mask][:5].tolist()
+            logger.warning(f"   OOB positions (first 5): {oob_positions}")
+            logger.warning(f"   OOB values (first 5): {oob_values}")
 
-        # Check for negative token IDs (shouldn't happen but be safe)
+            # Clamp to valid range - use pad_token_id as replacement
+            pad_id = self.tokenizer.pad_token_id or 0
+            input_ids = torch.where(
+                input_ids >= effective_vocab_size,
+                torch.tensor(pad_id, dtype=input_ids.dtype),
+                input_ids
+            )
+
+        # Check for negative token IDs
         if min_token_id < 0:
-            logger.warning(f"⚠️ Negative token ID detected! Min ID: {min_token_id}. Clamping to 0. Sample idx: {idx}")
+            logger.warning(f"⚠️ Negative token ID: {min_token_id}. Sample idx: {idx}. Clamping to 0.")
             input_ids = torch.clamp(input_ids, min=0)
 
         # Labels for language modeling
         labels = input_ids.clone()
-        labels[labels == self.tokenizer.pad_token_id] = -100
+        pad_token_id = self.tokenizer.pad_token_id
+        if pad_token_id is not None:
+            labels[labels == pad_token_id] = -100
 
         # Final validation: ensure labels are within vocab bounds (excluding -100)
         valid_labels_mask = labels != -100
         if valid_labels_mask.any():
             valid_labels = labels[valid_labels_mask]
-            if valid_labels.max().item() >= vocab_size or valid_labels.min().item() < 0:
+            if valid_labels.max().item() >= effective_vocab_size or valid_labels.min().item() < 0:
                 logger.warning(
-                    f"⚠️ Invalid label IDs detected after processing. Clamping. Sample idx: {idx}"
+                    f"⚠️ Invalid label IDs detected. Clamping. Sample idx: {idx}"
                 )
                 labels = torch.where(
                     valid_labels_mask,
-                    torch.clamp(labels, min=0, max=vocab_size - 1),
+                    torch.clamp(labels, min=0, max=effective_vocab_size - 1),
                     labels
                 )
 

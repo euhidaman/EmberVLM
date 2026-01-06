@@ -282,35 +282,43 @@ class EmberVLM(nn.Module):
         batch_size, seq_len = input_ids.size()
         device = input_ids.device
 
-        # CRITICAL SAFEGUARD: Validate input_ids before embedding lookup
-        # This prevents CUDA index out of bounds errors
+        # CRITICAL SAFEGUARD: Validate and fix input_ids BEFORE any embedding lookup
+        # The embedding lookup is synchronous on the tensor, so we must fix the tensor first
         vocab_size = self.language_model.get_input_embeddings().weight.shape[0]
-        max_token_id = input_ids.max().item()
 
-        if max_token_id >= vocab_size:
+        # Create a mask of invalid tokens (out of bounds)
+        invalid_mask = (input_ids >= vocab_size) | (input_ids < 0)
+
+        if invalid_mask.any():
             import logging
             logger = logging.getLogger(__name__)
+
+            # Count and log invalid tokens
+            num_invalid = invalid_mask.sum().item()
+            max_token_id = input_ids.max().item()
+            min_token_id = input_ids.min().item()
+
             logger.error(
-                f"❌ CRITICAL: input_ids contain token ID {max_token_id} >= vocab_size {vocab_size}! "
-                f"Clamping to prevent CUDA crash."
+                f"❌ CRITICAL: {num_invalid} invalid token IDs detected! "
+                f"Range: [{min_token_id}, {max_token_id}], Valid: [0, {vocab_size - 1}]. "
+                f"Replacing with pad token to prevent CUDA crash."
             )
-            # Clamp to valid range - use vocab_size - 1 (typically EOS or pad)
-            input_ids = torch.clamp(input_ids, max=vocab_size - 1)
 
-        # Also check for any negative indices (except -100 which shouldn't be in input_ids)
-        min_token_id = input_ids.min().item()
-        if min_token_id < 0:
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.error(f"❌ CRITICAL: input_ids contain negative token ID {min_token_id}! Clamping to 0.")
-            input_ids = torch.clamp(input_ids, min=0)
+            # Replace invalid tokens with pad token (safer than clamping)
+            pad_token_id = getattr(self.language_model.config, 'pad_token_id', 0) or 0
+            input_ids = torch.where(invalid_mask, torch.tensor(pad_token_id, device=device, dtype=input_ids.dtype), input_ids)
 
-        # Get text embeddings
+            # Force synchronization to ensure the fix is applied before embedding lookup
+            if device.type == 'cuda':
+                torch.cuda.synchronize(device)
+
+        # Get text embeddings - now safe to call
         text_embeds = self.language_model.embed_tokens(input_ids)
 
         if pixel_values is None:
             # No images, return text embeddings directly
-            attention_mask = (input_ids != self.language_model.config.pad_token_id).long()
+            pad_token_id = getattr(self.language_model.config, 'pad_token_id', 0) or 0
+            attention_mask = (input_ids != pad_token_id).long()
             return text_embeds, attention_mask
 
         # Encode images

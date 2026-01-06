@@ -237,8 +237,62 @@ class Stage3Trainer:
         self.last_robot_targets = None
         self.last_confidences = None
 
+        # Cache vocab size for validation
+        model_ref = self.model.module if hasattr(self.model, 'module') else self.model
+        if hasattr(model_ref.language_model, 'get_input_embeddings'):
+            self._vocab_size = model_ref.language_model.get_input_embeddings().weight.shape[0]
+        elif hasattr(model_ref.language_model, 'model'):
+            if hasattr(model_ref.language_model.model, 'get_input_embeddings'):
+                self._vocab_size = model_ref.language_model.model.get_input_embeddings().weight.shape[0]
+            else:
+                self._vocab_size = 50262  # fallback
+        else:
+            self._vocab_size = 50262  # fallback
+        logger.info(f"Cached vocab size for validation: {self._vocab_size}")
+
         if is_main_process():
             print_trainable_parameters(self.model)
+
+    def _validate_and_fix_tokens(self, input_ids: torch.Tensor, labels: torch.Tensor) -> tuple:
+        """Validate and fix token IDs before model forward pass.
+
+        This is a critical safeguard to prevent CUDA index out of bounds errors.
+        """
+        vocab_size = self._vocab_size
+        device = input_ids.device
+
+        # Check input_ids
+        invalid_input_mask = (input_ids >= vocab_size) | (input_ids < 0)
+        if invalid_input_mask.any():
+            num_invalid = invalid_input_mask.sum().item()
+            logger.warning(
+                f"⚠️ {num_invalid} invalid input_ids detected. "
+                f"Max: {input_ids.max().item()}, Min: {input_ids.min().item()}, "
+                f"Vocab: {vocab_size}. Replacing with 0."
+            )
+            input_ids = torch.where(invalid_input_mask, torch.zeros_like(input_ids), input_ids)
+
+        # Check labels (skip -100 which is ignore index)
+        valid_labels_mask = labels != -100
+        if valid_labels_mask.any():
+            valid_labels = labels[valid_labels_mask]
+            invalid_label_mask = (valid_labels >= vocab_size) | (valid_labels < 0)
+            if invalid_label_mask.any():
+                num_invalid = invalid_label_mask.sum().item()
+                logger.warning(
+                    f"⚠️ {num_invalid} invalid labels detected. Clamping to valid range."
+                )
+                # Create fixed labels
+                fixed_labels = labels.clone()
+                # Only clamp the valid (non -100) labels
+                fixed_labels = torch.where(
+                    valid_labels_mask & ((labels >= vocab_size) | (labels < 0)),
+                    torch.clamp(labels, min=0, max=vocab_size - 1),
+                    labels
+                )
+                labels = fixed_labels
+
+        return input_ids, labels
 
     def train_robot_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
         """Training step for robot selection."""
@@ -247,60 +301,17 @@ class Stage3Trainer:
         attention_mask = batch['attention_mask'].to(self.device)
         labels = batch['labels'].to(self.device)
         robot_targets = batch['robot_target'].to(self.device)
+
+        # CRITICAL: Validate and fix tokens BEFORE model forward pass
+        input_ids, labels = self._validate_and_fix_tokens(input_ids, labels)
+
         multi_robot_targets = batch.get('multi_robot_target')
         if multi_robot_targets is not None:
             multi_robot_targets = multi_robot_targets.to(self.device)
 
-        # CRITICAL: Validate input_ids and labels are within embedding bounds before forward pass
-        # This prevents cryptic CUDA index out of bounds errors
+        # Get model reference for config access
         model_ref = self.model.module if hasattr(self.model, 'module') else self.model
 
-        # Get actual embedding layer size
-        vocab_size = None
-        if hasattr(model_ref.language_model, 'get_input_embeddings'):
-            vocab_size = model_ref.language_model.get_input_embeddings().weight.shape[0]
-        elif hasattr(model_ref.language_model, 'model'):
-            if hasattr(model_ref.language_model.model, 'get_input_embeddings'):
-                vocab_size = model_ref.language_model.model.get_input_embeddings().weight.shape[0]
-
-        if vocab_size is not None:
-            # Validate and clamp input_ids
-            max_token_id = input_ids.max().item()
-            if max_token_id >= vocab_size:
-                logger.error(
-                    f"❌ CRITICAL: input_ids contain token ID {max_token_id} >= vocab_size {vocab_size}!"
-                )
-                # Clamp to prevent crash - this is a safeguard
-                input_ids = torch.clamp(input_ids, max=vocab_size - 1)
-                logger.warning(f"   Token IDs clamped to valid range [0, {vocab_size - 1}]")
-
-            # Check for negative token IDs
-            min_token_id = input_ids.min().item()
-            if min_token_id < 0:
-                logger.error(f"❌ CRITICAL: input_ids contain negative token ID {min_token_id}!")
-                input_ids = torch.clamp(input_ids, min=0)
-                logger.warning(f"   Token IDs clamped to valid range [0, {vocab_size - 1}]")
-
-            # Validate and clamp labels (skip -100 which is ignore index)
-            valid_labels_mask = labels != -100
-            if valid_labels_mask.any():
-                valid_labels = labels[valid_labels_mask]
-                max_label = valid_labels.max().item()
-                min_label = valid_labels.min().item()
-
-                if max_label >= vocab_size or min_label < 0:
-                    if max_label >= vocab_size:
-                        logger.error(f"❌ CRITICAL: labels contain token ID {max_label} >= vocab_size {vocab_size}!")
-                    if min_label < 0:
-                        logger.error(f"❌ CRITICAL: labels contain negative token ID {min_label}!")
-
-                    # Clamp labels: preserve -100 for ignore, clamp everything else to valid range
-                    labels = torch.where(
-                        valid_labels_mask,
-                        torch.clamp(labels, min=0, max=vocab_size - 1),
-                        labels
-                    )
-                    logger.warning(f"   Labels clamped to valid range [0, {vocab_size - 1}]")
 
         # Clamp robot targets to valid range to avoid gather OOB in losses
         num_robots = getattr(model_ref.config, 'num_robots', None)
