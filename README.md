@@ -902,18 +902,21 @@ Input Image (224×224×3)
 │      - Linear: 384 → 50,262 (vocab size)                     │
 │      - Output: [B, T, 50262] logits                          │
 │      - Purpose: Next token prediction, text generation        │
+│      - Used in: Stages 1, 2, 4                                │
 │                                                                │
-│   2. Robot Selection Head (Stage 3+):                         │
-│      - Pool sequence: mean([CLS] or all tokens)               │
-│      - Linear: 384 → 5 (robot classes)                       │
-│      - Output: [B, 5] robot logits                           │
-│      - Purpose: Select from 5 robot types                     │
+│   2. Robot Selection Head (Stage 3):                          │
+│      - Uses forward_vision_only() - bypasses LM entirely      │
+│      - Vision → Fusion → ReasoningModule → RobotSelectionHead │
+│      - Output: [B, 5] robot logits + confidence + plan        │
+│      - Purpose: Select from 5 robot types based on visual     │
+│                 scene understanding                           │
 │                                                                │
-│   3. Reasoning Module (Stage 4, Optional):                    │
-│      - 2-layer Transformer (384 dim, 4 heads)                │
-│      - Generates reasoning steps autoregressively             │
-│      - Output: [B, num_steps, 384]                           │
-│      - Purpose: Chain-of-thought reasoning generation         │
+│   3. Reasoning Module (Stages 3 & 4):                         │
+│      - ReasoningHead: 4-step chain-of-thought (384 dim)       │
+│      - RobotSelectionHead: 5-way robot classification         │
+│      - ActionPlanningHead: Action plan generation             │
+│      - Output: reasoning_chain, robot_logits, plan_steps      │
+│      - Purpose: Structured reasoning for robot selection      │
 └───────────────────────────────────────────────────────────────┘
         ↓
     Final Outputs:
@@ -1141,11 +1144,12 @@ multi_robot_loss = F.binary_cross_entropy_with_logits(
 - Data: LLaVA-Instruct-150K
 - Loss: Next token prediction (teacher forcing)
 
-**Stage 3: Robot Selection**
-- Frozen: Vision encoder
-- Trainable: Language model + robot head
+**Stage 3: Robot Selection (Vision-Based)**
+- Frozen: Vision encoder, Language model (bypassed for robot selection)
+- Trainable: Fusion module + reasoning module + robot selection head
 - Data: 8,138 robot scenarios (augmented to 17K)
-- Loss: Cross-entropy (robot classification) + language modeling
+- Loss: Cross-entropy (robot classification) via reasoning module
+- **Note**: Stage 3 uses `forward_vision_only()` which processes images directly through the reasoning module, bypassing the language model's tokenization to avoid index errors while preserving full chain-of-thought reasoning capabilities.
 
 **Stage 4: Reasoning Integration (Optional)**
 - Frozen: Vision encoder
@@ -1161,13 +1165,22 @@ image = PIL.Image.open("warehouse_scene.jpg")  # 224×224
 text = "Task: Transport heavy cargo from loading dock to storage area"
 ```
 
-**Forward Pass:**
+**Forward Pass (Full Mode - Stages 1, 2, 4):**
 1. **Vision Encoding**: `image → RepViT → [1, 384, 7, 7] → [1, 49, 384]`
 2. **Tokenization**: `text → tokenizer → [1, 15] token IDs`
 3. **Fusion**: `[49 visual + 15 text] → [1, 64, 384]`
 4. **Language Processing**: `Transformer(fused) → [1, 64, 384]`
 5. **Robot Selection**: `mean_pool → Linear → [1, 5] → softmax → probabilities`
 6. **Reasoning** (if enabled): `Generate text → "Step 1: Heavy cargo requires high payload..."`
+
+**Forward Pass (Vision-Only Mode - Stage 3):**
+1. **Vision Encoding**: `image → RepViT → [1, 384, 7, 7] → [1, 49, 384]`
+2. **Fusion**: `visual_tokens → FusionModule → [1, 8, 384]`
+3. **Reasoning Module**: `ReasoningHead + RobotSelectionHead + ActionPlanningHead`
+4. **Robot Selection**: `robot_logits → softmax → probabilities`
+5. **Action Planning**: `plan_steps + coherence_score`
+
+The vision-only mode (`forward_vision_only()`) bypasses tokenization entirely, making it robust for robot selection while still performing chain-of-thought reasoning through the dedicated reasoning module.
 
 **Output:**
 ```python
