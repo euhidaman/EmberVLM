@@ -675,6 +675,50 @@ class Stage3Trainer:
                             step=self.global_step,
                         )
 
+                # Log comprehensive stage summary with advanced visualizations
+                if hasattr(self.wandb_logger, 'log_comprehensive_stage_summary'):
+                    per_robot_metrics = self.robot_metrics.get_per_robot_metrics()
+                    all_preds = self.robot_metrics.get_all_predictions()
+                    all_targets = self.robot_metrics.get_all_targets()
+                    all_confidences = self.robot_metrics.get_all_confidences()
+                    all_correct = self.robot_metrics.get_all_correct()
+
+                    # Build confusion matrix
+                    cm = None
+                    if all_preds is not None and all_targets is not None:
+                        try:
+                            from sklearn.metrics import confusion_matrix as sklearn_cm
+                            cm = sklearn_cm(
+                                all_targets.cpu().numpy() if hasattr(all_targets, 'cpu') else all_targets,
+                                all_preds.cpu().numpy() if hasattr(all_preds, 'cpu') else all_preds,
+                                labels=list(range(5))
+                            )
+                        except Exception:
+                            pass
+
+                    extra_viz = {
+                        'per_robot_metrics': per_robot_metrics,
+                        'confidences': all_confidences,
+                        'correct': all_correct,
+                    }
+
+                    self.wandb_logger.log_comprehensive_stage_summary(
+                        stage=3,
+                        metrics=metrics,
+                        step=self.global_step,
+                        confusion_matrix=cm,
+                        class_names=["Drone", "Underwater", "Humanoid", "Wheeled", "Legged"],
+                        extra_visualizations=extra_viz,
+                    )
+
+                # Log training dashboard every epoch
+                if hasattr(self.wandb_logger, 'log_training_dashboard'):
+                    self.wandb_logger.log_training_dashboard(
+                        stage=3,
+                        metrics_history=self.wandb_logger.metrics_history if hasattr(self.wandb_logger, 'metrics_history') else {},
+                        step=self.global_step,
+                    )
+
         self.model.train()
         return metrics
 

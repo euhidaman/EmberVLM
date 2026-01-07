@@ -1264,3 +1264,171 @@ class CrossStageVisualizer:
 
         return fig, _fig_to_pil(fig)
 
+    def plot_benchmark_progression_heatmap(
+        self,
+        benchmark_scores: Dict[str, Dict[str, float]],  # {benchmark: {stage: score}}
+        save: bool = True
+    ) -> Tuple[plt.Figure, Image.Image]:
+        """Create heatmap showing benchmark score progression across stages."""
+        fig, ax = plt.subplots(figsize=(12, 8))
+
+        benchmarks = sorted(benchmark_scores.keys())
+        stages = sorted(list(benchmark_scores[benchmarks[0]].keys())) if benchmarks else []
+
+        if not benchmarks or not stages:
+            return fig, _fig_to_pil(fig)
+
+        matrix = np.zeros((len(benchmarks), len(stages)))
+        for i, bench in enumerate(benchmarks):
+            for j, stage in enumerate(stages):
+                matrix[i, j] = benchmark_scores[bench].get(stage, 0)
+
+        matrix_norm = matrix / matrix.max(axis=1, keepdims=True).clip(min=1e-10)
+        im = ax.imshow(matrix_norm, cmap='YlGnBu', aspect='auto', vmin=0, vmax=1)
+
+        ax.set_xticks(np.arange(len(stages)))
+        ax.set_yticks(np.arange(len(benchmarks)))
+        ax.set_xticklabels(stages)
+        ax.set_yticklabels(benchmarks)
+
+        cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        cbar.set_label('Normalized Score', rotation=270, labelpad=20)
+
+        for i in range(len(benchmarks)):
+            for j in range(len(stages)):
+                text = ax.text(j, i, f'{matrix[i, j]:.1f}',
+                             ha='center', va='center',
+                             color='white' if matrix_norm[i, j] > 0.5 else 'black',
+                             fontsize=9)
+
+        ax.set_title('Benchmark Score Progression Across Training Stages',
+                    fontsize=14, fontweight='bold', pad=20)
+        ax.set_xlabel('Training Stage', fontsize=12)
+        ax.set_ylabel('Benchmark', fontsize=12)
+        plt.tight_layout()
+
+        if save:
+            save_path = self.output_dir / "benchmark_progression_heatmap.png"
+            fig.savefig(save_path, bbox_inches='tight', dpi=300)
+
+        return fig, _fig_to_pil(fig)
+
+    def plot_ablation_tornado(
+        self,
+        ablation_results: Dict[str, float],
+        baseline_score: float,
+        save: bool = True
+    ) -> Tuple[plt.Figure, Image.Image]:
+        """Create tornado chart showing ablation study results."""
+        fig, ax = plt.subplots(figsize=(12, 8))
+
+        components = list(ablation_results.keys())
+        impacts = [ablation_results[c] - baseline_score for c in components]
+        sorted_idx = np.argsort(np.abs(impacts))[::-1]
+
+        components_sorted = [components[i] for i in sorted_idx]
+        impacts_sorted = [impacts[i] for i in sorted_idx]
+
+        colors = ['#E15759' if imp < 0 else '#59A14F' for imp in impacts_sorted]
+        y_pos = np.arange(len(components_sorted))
+
+        bars = ax.barh(y_pos, impacts_sorted, color=colors, alpha=0.7, edgecolor='black', linewidth=1.5)
+        ax.axvline(x=0, color='black', linestyle='--', linewidth=2, label='Baseline')
+
+        ax.set_yticks(y_pos)
+        ax.set_yticklabels(components_sorted, fontsize=11)
+        ax.set_xlabel('Impact on Performance (Δ Accuracy)', fontsize=12)
+        ax.set_title('Ablation Study: Component Impact Analysis',
+                    fontsize=14, fontweight='bold', pad=20)
+
+        for bar, impact in zip(bars, impacts_sorted):
+            width = bar.get_width()
+            label_x = width + (0.01 if width > 0 else -0.01)
+            ax.text(label_x, bar.get_y() + bar.get_height() / 2,
+                   f'{impact:+.3f}',
+                   ha='left' if width > 0 else 'right',
+                   va='center', fontsize=10, fontweight='bold')
+
+        ax.grid(axis='x', alpha=0.3, linestyle='--')
+        ax.legend()
+        plt.tight_layout()
+
+        if save:
+            save_path = self.output_dir / "ablation_tornado.png"
+            fig.savefig(save_path, bbox_inches='tight', dpi=300)
+
+        return fig, _fig_to_pil(fig)
+
+    def plot_parameter_efficiency_pareto(
+        self,
+        models_data: List[Dict[str, Union[str, float]]],
+        save: bool = True
+    ) -> Tuple[plt.Figure, Image.Image]:
+        """Create Pareto frontier plot for parameter efficiency analysis."""
+        fig, ax = plt.subplots(figsize=(12, 8))
+
+        names = [m['name'] for m in models_data]
+        params = np.array([m['params'] for m in models_data])
+        accuracies = np.array([m['accuracy'] for m in models_data])
+        memories = np.array([m.get('memory', 100) for m in models_data])
+
+        bubble_sizes = (memories / memories.max()) * 1000
+        efficiencies = accuracies / (params / 1e6)
+
+        scatter = ax.scatter(params / 1e6, accuracies, s=bubble_sizes,
+                           c=efficiencies, cmap='RdYlGn', alpha=0.6,
+                           edgecolors='black', linewidth=2)
+
+        cbar = plt.colorbar(scatter, ax=ax)
+        cbar.set_label('Efficiency (Acc/M Params)', rotation=270, labelpad=20)
+
+        # Find Pareto frontier
+        pareto_idx = []
+        for i in range(len(params)):
+            is_pareto = True
+            for j in range(len(params)):
+                if i != j:
+                    if params[j] <= params[i] and accuracies[j] >= accuracies[i]:
+                        if params[j] < params[i] or accuracies[j] > accuracies[i]:
+                            is_pareto = False
+                            break
+            if is_pareto:
+                pareto_idx.append(i)
+
+        if pareto_idx:
+            pareto_idx_sorted = sorted(pareto_idx, key=lambda i: params[i])
+            pareto_params = params[pareto_idx_sorted] / 1e6
+            pareto_accs = accuracies[pareto_idx_sorted]
+            ax.plot(pareto_params, pareto_accs, 'r--', linewidth=2,
+                   alpha=0.7, label='Pareto Frontier')
+
+        for i, name in enumerate(names):
+            ax.annotate(name, (params[i] / 1e6, accuracies[i]),
+                       xytext=(5, 5), textcoords='offset points',
+                       fontsize=9, alpha=0.8,
+                       bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.3))
+
+        ember_idx = [i for i, n in enumerate(names) if 'EmberVLM' in n or 'Ember' in n]
+        if ember_idx:
+            ax.scatter(params[ember_idx] / 1e6, accuracies[ember_idx],
+                      s=1500, facecolors='none', edgecolors='red',
+                      linewidths=3, label='EmberVLM')
+
+        ax.set_xlabel('Parameters (Millions)', fontsize=12)
+        ax.set_ylabel('Accuracy (%)', fontsize=12)
+        ax.set_title('Parameter Efficiency Pareto Frontier',
+                    fontsize=14, fontweight='bold', pad=20)
+        ax.legend(loc='lower right')
+        ax.grid(True, alpha=0.3)
+
+        if params.max() / params.min() > 100:
+            ax.set_xscale('log')
+
+        plt.tight_layout()
+
+        if save:
+            save_path = self.output_dir / "parameter_efficiency_pareto.png"
+            fig.savefig(save_path, bbox_inches='tight', dpi=300)
+
+        return fig, _fig_to_pil(fig)
+
