@@ -519,13 +519,38 @@ def run_all_stages(args: argparse.Namespace):
             })
             stage4_config = TrainingConfig(**stage4_dict)
 
+            # Priority order for reasoning data:
+            # 1. Explicitly provided reasoning_data path
+            # 2. outputs/reasoning-data directory
+            # 3. Fall back to robot_data (auto-generates reasoning chains)
             reasoning_dir = args.reasoning_data or str(output_dir / 'reasoning-data')
 
+            data_dir_to_use = None
+            data_source_type = None
+
             if Path(reasoning_dir).exists():
+                data_dir_to_use = reasoning_dir
+                data_source_type = "explicit reasoning data"
+            elif args.robot_data and Path(args.robot_data).exists():
+                # Fall back to robot selection data - ReasoningDataset will auto-generate chains
+                data_dir_to_use = args.robot_data
+                data_source_type = "robot selection data (auto-generating reasoning chains)"
+                logger.info("No dedicated reasoning data found. Using robot selection data with auto-generated reasoning chains.")
+            else:
+                # Check default robot data location
+                default_robot_dir = str(output_dir.parent / 'robot-selection-dataset')
+                if Path(default_robot_dir).exists():
+                    data_dir_to_use = default_robot_dir
+                    data_source_type = "robot selection data (auto-generating reasoning chains)"
+                    logger.info("No dedicated reasoning data found. Using robot selection data with auto-generated reasoning chains.")
+
+            if data_dir_to_use is not None:
+                logger.info(f"Stage 4 data source: {data_source_type}")
+                logger.info(f"Stage 4 data directory: {data_dir_to_use}")
                 run_stage4_training(
                     model=model,
                     config=stage4_config,
-                    data_dir=reasoning_dir,
+                    data_dir=data_dir_to_use,
                     tokenizer=tokenizer,
                     phase1_epochs=args.stage4_phase1_epochs,
                     phase2_epochs=args.stage4_phase2_epochs,
@@ -534,7 +559,10 @@ def run_all_stages(args: argparse.Namespace):
                 from embervlm.training.train_utils import unwrap_model
                 model = unwrap_model(model)
             else:
-                logger.warning("Stage 4 data not provided, skipping...")
+                logger.warning("Stage 4: No reasoning or robot selection data found, skipping...")
+                logger.warning("  To run Stage 4, provide either:")
+                logger.warning("    --reasoning_data <path>  (explicit reasoning chains)")
+                logger.warning("    --robot_data <path>      (will auto-generate reasoning chains)")
 
         # Unwrap model before saving (in case it's still wrapped)
         from embervlm.training.train_utils import unwrap_model
