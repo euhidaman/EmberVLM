@@ -521,6 +521,13 @@ class Stage3Trainer:
 
         val_data = self.val_dataloader if self.val_dataloader else self.robot_dataloader
 
+        # Get vocab size for validation - handle DDP wrapper
+        model_for_vocab = self.model.module if hasattr(self.model, 'module') else self.model
+        try:
+            vocab_size = model_for_vocab.language_model.get_input_embeddings().weight.shape[0]
+        except Exception:
+            vocab_size = 50262  # Fallback to expected vocab size
+
         for batch in tqdm(
             val_data,
             desc="Evaluating",
@@ -529,6 +536,20 @@ class Stage3Trainer:
             pixel_values = batch['pixel_values'].to(self.device)
             input_ids = batch['input_ids'].to(self.device)
             attention_mask = batch['attention_mask'].to(self.device)
+
+            # CRITICAL FIX: Validate and clamp input_ids BEFORE model forward
+            # This prevents CUDA index out of bounds errors during embedding lookup
+            invalid_mask = (input_ids >= vocab_size) | (input_ids < 0)
+            if invalid_mask.any():
+                num_invalid = invalid_mask.sum().item()
+                logger.warning(
+                    f"⚠️ Eval: {num_invalid} invalid token IDs detected "
+                    f"(max={input_ids.max().item()}, vocab_size={vocab_size}). Clamping to 0."
+                )
+                input_ids = torch.where(invalid_mask, torch.zeros_like(input_ids), input_ids)
+                # Synchronize CUDA to ensure clamping is applied before forward
+                if self.device.type == 'cuda':
+                    torch.cuda.synchronize(self.device)
 
             robot_targets = batch.get('robot_target')
             multi_robot_targets = batch.get('multi_robot_target')
