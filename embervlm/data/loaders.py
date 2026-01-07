@@ -1103,11 +1103,76 @@ class ReasoningDataset(BaseVLMDataset):
     """
     Dataset for Stage 4 reasoning training (DeepSeek-R1 style).
 
-    Supports both legacy format (reasoning_chain list) and new XML format.
+    Supports:
+    1. Legacy format (reasoning_chain list)
+    2. XML format (<reasoning>...</reasoning><answer>...</answer>)
+    3. Robot selection data (auto-generates reasoning chains from task + subtasks)
     """
 
+    # Robot capabilities for auto-generating reasoning
+    ROBOT_KNOWLEDGE = {
+        'Drone': {
+            'capabilities': ['aerial navigation', 'surveillance', 'fast movement', 'hard to reach areas', 'aerial inspection'],
+            'limitations': ['limited payload', 'weather dependent', 'battery life'],
+            'environments': ['outdoor', 'large indoor spaces', 'tall structures'],
+        },
+        'Humanoid': {
+            'capabilities': ['manipulation', 'human interaction', 'complex tasks', 'tool use', 'walking'],
+            'limitations': ['slow movement', 'balance issues', 'high power consumption'],
+            'environments': ['indoor', 'human environments', 'stairs'],
+        },
+        'Robot with Wheels': {
+            'capabilities': ['fast movement', 'good payload', 'stable platform', 'efficient'],
+            'limitations': ['flat surfaces only', 'limited climbing'],
+            'environments': ['indoor', 'warehouse', 'flat outdoor areas', 'roads'],
+        },
+        'Robot with Legs': {
+            'capabilities': ['rough terrain navigation', 'stability', 'load carrying', 'stairs'],
+            'limitations': ['limited manipulation', 'height restrictions'],
+            'environments': ['outdoor', 'uneven terrain', 'industrial sites', 'search and rescue'],
+        },
+        'Underwater Robot': {
+            'capabilities': ['underwater navigation', 'deep sea exploration', 'marine inspection'],
+            'limitations': ['water environments only', 'pressure constraints'],
+            'environments': ['underwater', 'marine', 'pools', 'pipes', 'ocean'],
+        },
+    }
+
+    def _generate_reasoning_chain(self, task: str, robot: str, subtasks: List[Dict] = None) -> List[str]:
+        """Auto-generate reasoning chain from task and selected robot."""
+        chain = []
+
+        # Extract task name
+        task_clean = task.replace('Task:', '').strip()
+        chain.append(f"Analyzing task: {task_clean}")
+
+        # Get robot knowledge
+        robot_info = self.ROBOT_KNOWLEDGE.get(robot, {})
+        capabilities = robot_info.get('capabilities', [])
+        environments = robot_info.get('environments', [])
+
+        # Generate reasoning based on task and robot match
+        if capabilities:
+            relevant_caps = capabilities[:3]  # Top 3 capabilities
+            chain.append(f"{robot} has relevant capabilities: {', '.join(relevant_caps)}")
+
+        if environments:
+            chain.append(f"{robot} is suitable for environments like: {', '.join(environments[:2])}")
+
+        # If we have subtasks, use them for more detailed reasoning
+        if subtasks:
+            chain.append(f"Breaking down into {len(subtasks)} subtasks for optimal execution")
+            for st in subtasks[:3]:  # Max 3 subtasks in reasoning
+                subtask_desc = st.get('subtask', '')
+                assigned = st.get('assigned_robot', robot)
+                chain.append(f"Subtask '{subtask_desc[:50]}...' assigned to {assigned}")
+
+        chain.append(f"Conclusion: {robot} is the best choice for this task")
+
+        return chain
+
     def _load_data(self) -> List[Dict[str, Any]]:
-        """Load reasoning data with chains."""
+        """Load reasoning data with chains. Auto-generates chains for robot selection data."""
         import logging
         logger = logging.getLogger(__name__)
 
@@ -1132,27 +1197,86 @@ class ReasoningDataset(BaseVLMDataset):
 
             if isinstance(data, list):
                 for item in data:
-                    sample = {
-                        'instruction': item.get('instruction', ''),
-                        'reasoning_chain': item.get('reasoning_chain', []),
-                        'response': item.get('response', ''),
-                        'robot_target': item.get('selected_robot', item.get('robot_target', item.get('answer'))),
-                        'task': item.get('task', ''),
-                        'format': item.get('format', 'legacy'),  # 'xml' or 'legacy'
-                    }
+                    # Detect data type and handle accordingly
 
-                    # Handle image if present
-                    if 'image' in item:
-                        image_path = item['image']
-                        if not os.path.isabs(image_path):
-                            image_path = str(json_parent / image_path)
-                        sample['image'] = image_path
+                    # Case 1: Robot selection data (single robot)
+                    if 'output' in item and 'input' in item and 'Task:' in item.get('input', ''):
+                        # This is single robot selection format
+                        task = item.get('input', '')
+                        selected_robot = item.get('output', '')
 
-                    # Handle chat-style prompt (DeepSeek-R1 style)
-                    if 'prompt' in item:
-                        sample['prompt'] = item['prompt']
+                        # Handle multi-robot output (e.g., "Drone, Robot with Legs")
+                        if ',' in selected_robot:
+                            primary_robot = selected_robot.split(',')[0].strip()
+                        else:
+                            primary_robot = selected_robot.strip()
 
-                    samples.append(sample)
+                        # Auto-generate reasoning chain
+                        reasoning_chain = self._generate_reasoning_chain(task, primary_robot)
+
+                        sample = {
+                            'instruction': item.get('instruction', ''),
+                            'reasoning_chain': reasoning_chain,
+                            'response': selected_robot,
+                            'robot_target': primary_robot,
+                            'task': task,
+                            'format': 'auto_generated',
+                        }
+                        samples.append(sample)
+
+                    # Case 2: Multi-robot selection data (with subtasks)
+                    elif 'subtasks' in item and 'input' in item:
+                        task = item.get('input', '')
+                        subtasks = item.get('subtasks', [])
+                        original_output = item.get('original_single_robot_output', '')
+
+                        # Get primary robot from subtasks or original output
+                        if subtasks:
+                            primary_robot = subtasks[0].get('assigned_robot', original_output.split(',')[0].strip() if original_output else 'Drone')
+                        else:
+                            primary_robot = original_output.split(',')[0].strip() if original_output else 'Drone'
+
+                        # Auto-generate reasoning chain using subtasks
+                        reasoning_chain = self._generate_reasoning_chain(task, primary_robot, subtasks)
+
+                        # Build response with all assigned robots
+                        assigned_robots = list(set([st.get('assigned_robot', '') for st in subtasks if st.get('assigned_robot')]))
+                        response = ', '.join(assigned_robots) if assigned_robots else original_output
+
+                        sample = {
+                            'instruction': item.get('instruction', ''),
+                            'reasoning_chain': reasoning_chain,
+                            'response': response,
+                            'robot_target': primary_robot,
+                            'task': task,
+                            'subtasks': subtasks,
+                            'format': 'auto_generated',
+                        }
+                        samples.append(sample)
+
+                    # Case 3: Pre-formatted reasoning data (original format)
+                    else:
+                        sample = {
+                            'instruction': item.get('instruction', ''),
+                            'reasoning_chain': item.get('reasoning_chain', []),
+                            'response': item.get('response', ''),
+                            'robot_target': item.get('selected_robot', item.get('robot_target', item.get('answer'))),
+                            'task': item.get('task', ''),
+                            'format': item.get('format', 'legacy'),
+                        }
+
+                        # Handle image if present
+                        if 'image' in item:
+                            image_path = item['image']
+                            if not os.path.isabs(image_path):
+                                image_path = str(json_parent / image_path)
+                            sample['image'] = image_path
+
+                        # Handle chat-style prompt (DeepSeek-R1 style)
+                        if 'prompt' in item:
+                            sample['prompt'] = item['prompt']
+
+                        samples.append(sample)
 
         # Split
         if self.split == 'train':
