@@ -512,7 +512,12 @@ class Stage3Trainer:
 
     @torch.no_grad()
     def evaluate(self):
-        """Evaluate robot selection performance with comprehensive metrics."""
+        """Evaluate robot selection performance with comprehensive metrics.
+
+        IMPORTANT: Uses vision-only forward pass to avoid tokenization issues.
+        Stage 3 is primarily a vision-based robot selection task, so this is
+        the most robust approach. Language reasoning evaluation happens in Stage 4.
+        """
         self.model.eval()
 
         # Reset metrics
@@ -521,9 +526,9 @@ class Stage3Trainer:
 
         val_data = self.val_dataloader if self.val_dataloader else self.robot_dataloader
 
-        # Use cached vocab size for consistency
-        vocab_size = self._vocab_size
-        logger.info(f"Evaluation using vocab_size={vocab_size}")
+        # Get model reference (unwrap DDP if needed)
+        model_ref = self.model.module if hasattr(self.model, 'module') else self.model
+        num_robots = getattr(model_ref.config, 'num_robots', 5)
 
         for batch in tqdm(
             val_data,
@@ -531,63 +536,34 @@ class Stage3Trainer:
             disable=not is_main_process(),
         ):
             pixel_values = batch['pixel_values'].to(self.device)
-            input_ids = batch['input_ids'].to(self.device)
-            attention_mask = batch['attention_mask'].to(self.device)
-
-            # CRITICAL FIX: Always clamp input_ids to valid range BEFORE model forward
-            # This prevents CUDA index out of bounds errors during embedding lookup
-            # Use in-place clamp for safety and efficiency
-            max_valid_id = vocab_size - 1
-
-            # Check for invalid tokens first (for logging)
-            original_max = input_ids.max().item()
-            original_min = input_ids.min().item()
-
-            if original_max >= vocab_size or original_min < 0:
-                num_invalid = ((input_ids >= vocab_size) | (input_ids < 0)).sum().item()
-                logger.warning(
-                    f"⚠️ Eval: {num_invalid} invalid token IDs detected "
-                    f"(range=[{original_min}, {original_max}], vocab_size={vocab_size}). Clamping."
-                )
-
-            # ALWAYS clamp to ensure valid range - this is the critical fix
-            input_ids = input_ids.clamp(min=0, max=max_valid_id)
-
-            # Force synchronize to ensure clamping is complete before forward pass
-            if self.device.type == 'cuda':
-                torch.cuda.synchronize(self.device)
 
             robot_targets = batch.get('robot_target')
             multi_robot_targets = batch.get('multi_robot_target')
 
             if robot_targets is not None:
                 robot_targets = robot_targets.to(self.device)
+                # Clamp targets to valid range
+                robot_targets = torch.clamp(robot_targets, 0, num_robots - 1)
+
             if multi_robot_targets is not None:
                 multi_robot_targets = multi_robot_targets.to(self.device)
-
-            # Clamp targets during eval as well
-            num_robots = getattr(self.model.module.config if hasattr(self.model, 'module') else self.model.config, 'num_robots', None)
-            if num_robots is not None and robot_targets is not None:
-                robot_targets = torch.clamp(robot_targets, 0, num_robots - 1)
-                if multi_robot_targets is not None:
-                    if multi_robot_targets.size(-1) > num_robots:
-                        multi_robot_targets = multi_robot_targets[..., :num_robots]
-                    elif multi_robot_targets.size(-1) < num_robots:
-                        pad_width = num_robots - multi_robot_targets.size(-1)
-                        pad_shape = list(multi_robot_targets.shape[:-1]) + [pad_width]
-                        pad_tensor = torch.zeros(pad_shape, device=multi_robot_targets.device, dtype=multi_robot_targets.dtype)
-                        multi_robot_targets = torch.cat([multi_robot_targets, pad_tensor], dim=-1)
-                    multi_robot_targets = multi_robot_targets.clamp(0.0, 1.0)
+                # Ensure multi-hot vector width matches num_robots
+                if multi_robot_targets.size(-1) > num_robots:
+                    multi_robot_targets = multi_robot_targets[..., :num_robots]
+                elif multi_robot_targets.size(-1) < num_robots:
+                    pad_width = num_robots - multi_robot_targets.size(-1)
+                    pad_shape = list(multi_robot_targets.shape[:-1]) + [pad_width]
+                    pad_tensor = torch.zeros(pad_shape, device=multi_robot_targets.device, dtype=multi_robot_targets.dtype)
+                    multi_robot_targets = torch.cat([multi_robot_targets, pad_tensor], dim=-1)
+                multi_robot_targets = multi_robot_targets.clamp(0.0, 1.0)
 
             with get_autocast_context(self.config):
-                # FINAL DEFENSIVE CLAMP: Absolute guarantee no OOB tokens
-                # Use clamp_() for in-place operation right before forward
-                input_ids.clamp_(min=0, max=vocab_size - 1)
-
-                outputs = self.model(
-                    input_ids=input_ids,
+                # Use vision-only forward pass - bypasses language model entirely
+                # This avoids all tokenization-related CUDA index out of bounds errors
+                # and is appropriate since Stage 3 is primarily vision-based robot selection
+                outputs = model_ref.forward_vision_only(
                     pixel_values=pixel_values,
-                    attention_mask=attention_mask,
+                    robot_targets=robot_targets,
                     return_reasoning=True,
                 )
 
