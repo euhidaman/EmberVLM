@@ -1230,18 +1230,26 @@ class ReasoningDataset(BaseVLMDataset):
                         subtasks = item.get('subtasks', [])
                         original_output = item.get('original_single_robot_output', '')
 
+                        # Handle original_output being either a string or list
+                        if isinstance(original_output, list):
+                            # If it's a list, join and take first robot
+                            original_output_str = ', '.join(str(r) for r in original_output) if original_output else ''
+                        else:
+                            original_output_str = str(original_output) if original_output else ''
+
                         # Get primary robot from subtasks or original output
                         if subtasks:
-                            primary_robot = subtasks[0].get('assigned_robot', original_output.split(',')[0].strip() if original_output else 'Drone')
+                            first_robot_fallback = original_output_str.split(',')[0].strip() if original_output_str else 'Drone'
+                            primary_robot = subtasks[0].get('assigned_robot', first_robot_fallback)
                         else:
-                            primary_robot = original_output.split(',')[0].strip() if original_output else 'Drone'
+                            primary_robot = original_output_str.split(',')[0].strip() if original_output_str else 'Drone'
 
                         # Auto-generate reasoning chain using subtasks
                         reasoning_chain = self._generate_reasoning_chain(task, primary_robot, subtasks)
 
                         # Build response with all assigned robots
                         assigned_robots = list(set([st.get('assigned_robot', '') for st in subtasks if st.get('assigned_robot')]))
-                        response = ', '.join(assigned_robots) if assigned_robots else original_output
+                        response = ', '.join(assigned_robots) if assigned_robots else original_output_str
 
                         sample = {
                             'instruction': item.get('instruction', ''),
