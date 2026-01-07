@@ -245,63 +245,102 @@ class EnhancedRobotSelectionDataset(Dataset):
             logger.warning(f"Failed to parse multi-robot sample: {e}")
             return None
 
-    def _generate_reasoning(self, task: str, robot: str) -> List[str]:
-        """Generate chain-of-thought reasoning for single robot selection."""
-        reasoning_steps = []
+    def _generate_reasoning(self, task: str, robot: str) -> str:
+        """Generate chain-of-thought reasoning for single robot selection in XML format (DeepSeek-R1 style)."""
+        reasoning_parts = []
 
         # Step 1: Analyze task requirements
         task_lower = task.lower()
         requirements = []
-        for keyword in ['inspect', 'survey', 'transport', 'navigate', 'search', 'deliver', 'climb', 'underwater']:
+        for keyword in ['inspect', 'survey', 'transport', 'navigate', 'search', 'deliver', 'climb', 'underwater', 'rescue', 'monitor']:
             if keyword in task_lower:
                 requirements.append(keyword)
-        reasoning_steps.append(f"Task Analysis: Identified key requirements: {', '.join(requirements) if requirements else 'general navigation'}")
+
+        reasoning_parts.append(f"Step 1: Task Analysis")
+        reasoning_parts.append(f"The task requires: {', '.join(requirements) if requirements else 'general navigation and operation'}.")
 
         # Step 2: Environment analysis
         environments = []
         env_keywords = {
-            'outdoor': ['outdoor', 'field', 'desert', 'mountain', 'forest'],
-            'indoor': ['indoor', 'building', 'warehouse', 'room'],
-            'aerial': ['air', 'roof', 'above', 'height', 'exterior', 'high'],
-            'underwater': ['underwater', 'ocean', 'sea', 'water', 'pipe'],
-            'rough terrain': ['rough', 'rocky', 'rubble', 'stairs', 'climb'],
+            'outdoor': ['outdoor', 'field', 'desert', 'mountain', 'forest', 'external'],
+            'indoor': ['indoor', 'building', 'warehouse', 'room', 'inside', 'facility'],
+            'aerial': ['air', 'roof', 'above', 'height', 'exterior', 'high', 'sky', 'flying'],
+            'underwater': ['underwater', 'ocean', 'sea', 'water', 'pipe', 'marine', 'submerged'],
+            'rough terrain': ['rough', 'rocky', 'rubble', 'stairs', 'climb', 'uneven', 'mountain'],
         }
         for env_type, keywords in env_keywords.items():
             if any(kw in task_lower for kw in keywords):
                 environments.append(env_type)
-        reasoning_steps.append(f"Environment Assessment: {', '.join(environments) if environments else 'standard environment'}")
+
+        reasoning_parts.append(f"Step 2: Environment Assessment")
+        reasoning_parts.append(f"Identified environment type(s): {', '.join(environments) if environments else 'standard environment'}.")
 
         # Step 3: Robot capability matching
+        reasoning_parts.append(f"Step 3: Robot Capability Matching")
         if robot in ROBOT_CAPABILITIES:
             caps = ROBOT_CAPABILITIES[robot]
-            strengths = caps['strengths'][:2]  # Top 2 strengths
-            reasoning_steps.append(f"Robot Matching: {robot} selected for {', '.join(strengths)}")
+            strengths = caps['strengths'][:3]
+            weaknesses = caps['weaknesses'][:2]
+            reasoning_parts.append(f"{robot} has these key strengths: {', '.join(strengths)}.")
+            reasoning_parts.append(f"Considerations: {', '.join(weaknesses)}.")
+        else:
+            reasoning_parts.append(f"{robot} is being evaluated for this task.")
 
-        # Step 4: Justification
-        reasoning_steps.append(f"Decision: {robot} is optimal for this task based on environmental constraints and capability requirements")
+        # Step 4: Final justification
+        reasoning_parts.append(f"Step 4: Decision")
+        reasoning_parts.append(f"Based on the task requirements and environmental analysis, {robot} is the optimal choice because its capabilities align well with the mission objectives.")
 
-        return reasoning_steps
+        # Return in XML format (DeepSeek-R1 / tiny-r1 style)
+        reasoning_text = "\n".join(reasoning_parts)
+        return reasoning_text
 
-    def _generate_multi_robot_reasoning(self, task: str, robot_assignments: Dict, subtasks: List) -> List[str]:
-        """Generate reasoning for multi-robot coordination."""
-        reasoning_steps = []
+    def _generate_reasoning_list(self, task: str, robot: str) -> List[str]:
+        """Generate reasoning as a list of steps (legacy format)."""
+        reasoning_text = self._generate_reasoning(task, robot)
+        # Split by "Step X:" to get list format
+        import re
+        steps = re.split(r'Step \d+:', reasoning_text)
+        return [s.strip() for s in steps if s.strip()]
+
+    def _generate_multi_robot_reasoning(self, task: str, robot_assignments: Dict, subtasks: List) -> str:
+        """Generate reasoning for multi-robot coordination in XML format (DeepSeek-R1 style)."""
+        reasoning_parts = []
 
         # Step 1: Task decomposition
-        reasoning_steps.append(f"Task Decomposition: Complex task requiring {len(robot_assignments)} different robot types")
+        reasoning_parts.append(f"Step 1: Task Decomposition")
+        reasoning_parts.append(f"This is a complex task requiring coordination of {len(robot_assignments)} different robot types.")
+        reasoning_parts.append(f"Total subtasks identified: {len(subtasks)}.")
 
         # Step 2: Subtask analysis
-        subtask_desc = [s['subtask'][:50] for s in subtasks[:3]]  # First 3 subtasks
-        reasoning_steps.append(f"Subtask Identification: {len(subtasks)} subtasks including: {', '.join(subtask_desc)}")
+        reasoning_parts.append(f"Step 2: Subtask Analysis")
+        for i, subtask in enumerate(subtasks[:4], 1):  # Show first 4 subtasks
+            reasoning_parts.append(f"  - Subtask {i}: {subtask['subtask'][:60]}...")
 
         # Step 3: Robot assignment strategy
+        reasoning_parts.append(f"Step 3: Robot Assignment Strategy")
         for robot, tasks in robot_assignments.items():
-            reasoning_steps.append(f"{robot} Assignment: {len(tasks)} subtask(s) - primary role in {tasks[0]['subtask'][:40]}")
+            if robot in ROBOT_CAPABILITIES:
+                strengths = ROBOT_CAPABILITIES[robot]['strengths'][:2]
+                reasoning_parts.append(f"  - {robot}: Assigned {len(tasks)} subtask(s). Key capabilities: {', '.join(strengths)}.")
+            else:
+                reasoning_parts.append(f"  - {robot}: Assigned {len(tasks)} subtask(s).")
 
         # Step 4: Execution coordination
         execution_orders = sorted(set(s['execution_order'] for s in subtasks))
-        reasoning_steps.append(f"Execution Plan: {len(execution_orders)} phases with coordinated robot deployment")
+        reasoning_parts.append(f"Step 4: Execution Plan")
+        reasoning_parts.append(f"Mission will be executed in {len(execution_orders)} phases with coordinated robot deployment.")
+        reasoning_parts.append(f"Primary robot takes lead based on task complexity and mission criticality.")
 
-        return reasoning_steps
+        # Return in XML format (DeepSeek-R1 / tiny-r1 style)
+        reasoning_text = "\n".join(reasoning_parts)
+        return reasoning_text
+
+    def _generate_multi_robot_reasoning_list(self, task: str, robot_assignments: Dict, subtasks: List) -> List[str]:
+        """Generate multi-robot reasoning as a list of steps (legacy format)."""
+        reasoning_text = self._generate_multi_robot_reasoning(task, robot_assignments, subtasks)
+        import re
+        steps = re.split(r'Step \d+:', reasoning_text)
+        return [s.strip() for s in steps if s.strip()]
 
     def _assess_difficulty(self, task: str, num_robots: int) -> str:
         """Assess task difficulty for curriculum learning."""

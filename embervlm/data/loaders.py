@@ -1100,7 +1100,11 @@ class InstructionDataset(BaseVLMDataset):
 
 
 class ReasoningDataset(BaseVLMDataset):
-    """Dataset for Stage 4 reasoning training."""
+    """
+    Dataset for Stage 4 reasoning training (DeepSeek-R1 style).
+
+    Supports both legacy format (reasoning_chain list) and new XML format.
+    """
 
     def _load_data(self) -> List[Dict[str, Any]]:
         """Load reasoning data with chains."""
@@ -1128,17 +1132,27 @@ class ReasoningDataset(BaseVLMDataset):
 
             if isinstance(data, list):
                 for item in data:
+                    sample = {
+                        'instruction': item.get('instruction', ''),
+                        'reasoning_chain': item.get('reasoning_chain', []),
+                        'response': item.get('response', ''),
+                        'robot_target': item.get('selected_robot', item.get('robot_target', item.get('answer'))),
+                        'task': item.get('task', ''),
+                        'format': item.get('format', 'legacy'),  # 'xml' or 'legacy'
+                    }
+
+                    # Handle image if present
                     if 'image' in item:
                         image_path = item['image']
                         if not os.path.isabs(image_path):
                             image_path = str(json_parent / image_path)
-                        samples.append({
-                            'image': image_path,
-                            'instruction': item.get('instruction', ''),
-                            'reasoning_chain': item.get('reasoning_chain', []),
-                            'response': item.get('response', ''),
-                            'robot_target': item.get('selected_robot', item.get('robot_target')),
-                        })
+                        sample['image'] = image_path
+
+                    # Handle chat-style prompt (DeepSeek-R1 style)
+                    if 'prompt' in item:
+                        sample['prompt'] = item['prompt']
+
+                    samples.append(sample)
 
         # Split
         if self.split == 'train':
@@ -1152,18 +1166,32 @@ class ReasoningDataset(BaseVLMDataset):
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         sample = self.samples[idx]
 
-        pixel_values = self._load_image(sample['image'])
+        # Load image if present
+        if 'image' in sample and sample['image']:
+            pixel_values = self._load_image(sample['image'])
+        else:
+            # Create placeholder image for text-only samples
+            pixel_values = torch.zeros(3, self.image_size, self.image_size)
 
-        # Format with reasoning chain
-        reasoning_text = ""
-        if sample['reasoning_chain']:
-            reasoning_steps = "\n".join([
-                f"Step {i+1}: {step}"
-                for i, step in enumerate(sample['reasoning_chain'])
-            ])
-            reasoning_text = f"<|reasoning_start|>\n{reasoning_steps}\n<|reasoning_end|>\n"
+        # Check if this is XML format (DeepSeek-R1 style)
+        is_xml_format = sample.get('format') == 'xml' or '<reasoning>' in sample.get('response', '')
 
-        text = f"{sample['instruction']}\n{reasoning_text}{sample['response']}"
+        if is_xml_format:
+            # XML format: response already contains <reasoning>...</reasoning><answer>...</answer>
+            text = f"{sample['instruction']}\n\n{sample['response']}"
+        else:
+            # Legacy format: Build text from reasoning chain list
+            reasoning_text = ""
+            if sample['reasoning_chain']:
+                reasoning_steps = "\n".join([
+                    f"Step {i+1}: {step}"
+                    for i, step in enumerate(sample['reasoning_chain'])
+                ])
+                reasoning_text = f"<reasoning>\n{reasoning_steps}\n</reasoning>\n<answer>\n{sample.get('robot_target', '')}\n</answer>"
+                text = f"{sample['instruction']}\n\n{reasoning_text}"
+            else:
+                text = f"{sample['instruction']}\n{sample['response']}"
+
         text_data = self._tokenize(text)
 
         result = {
@@ -1173,15 +1201,21 @@ class ReasoningDataset(BaseVLMDataset):
 
         # Add robot target if available
         robot_mapping = {
-            'Drone': 0, 'Humanoid': 1, 'Wheeled': 2,
-            'Legged': 3, 'Underwater': 4
+            'Drone': 0, 'drone': 0,
+            'Humanoid': 1, 'humanoid': 1,
+            'Wheeled': 2, 'Robot with Wheels': 2, 'robot with wheels': 2, 'wheeled robot': 2,
+            'Legged': 3, 'Robot with Legs': 3, 'robot with legs': 3, 'legged robot': 3,
+            'Underwater': 4, 'Underwater Robot': 4, 'underwater robot': 4,
         }
 
         robot_target = sample.get('robot_target')
         if robot_target is not None:
             if isinstance(robot_target, str):
-                robot_target = robot_mapping.get(robot_target, 0)
+                # Try to normalize the robot name
+                robot_target_lower = robot_target.lower().strip()
+                robot_target = robot_mapping.get(robot_target, robot_mapping.get(robot_target_lower, 0))
             result['robot_target'] = torch.tensor(robot_target, dtype=torch.long)
+            result['robot_target_names'] = sample.get('robot_target', '')  # Keep string name for rewards
 
         return result
 

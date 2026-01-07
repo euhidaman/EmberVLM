@@ -4,6 +4,10 @@ Stage 4: Chain-of-Thought Reasoning Integration
 Integrates DeepSeek-R1 style reasoning with two-phase training:
 1. Train reasoning heads with frozen backbone
 2. Joint fine-tuning with reduced learning rate
+
+Inspired by tiny-r1, uses structured XML format:
+<reasoning>...</reasoning>
+<answer>...</answer>
 """
 
 import os
@@ -40,6 +44,21 @@ from embervlm.data.loaders import get_reasoning_dataloader
 from embervlm.monitoring.wandb_logger import WandbLogger
 from embervlm.monitoring.carbon_tracker import CarbonTracker
 
+# Import reward functions (tiny-r1 style)
+try:
+    from embervlm.training.reasoning_rewards import (
+        ReasoningRewardModel,
+        ReasoningRewardLoss,
+        extract_xml_answer,
+        extract_xml_reasoning,
+        compute_total_reward,
+    )
+    HAS_REWARD_FUNCS = True
+except ImportError:
+    HAS_REWARD_FUNCS = False
+    ReasoningRewardModel = None
+    ReasoningRewardLoss = None
+
 logger = logging.getLogger(__name__)
 
 # Try to import stage visualizer
@@ -52,25 +71,34 @@ except ImportError:
 
 
 class ReasoningConsistencyLoss(nn.Module):
-    """Loss for ensuring consistent reasoning chains."""
+    """Loss for ensuring consistent reasoning chains (DeepSeek-R1 style)."""
 
-    def __init__(self):
+    def __init__(self, use_reward_model: bool = True):
         super().__init__()
+        self.use_reward_model = use_reward_model and HAS_REWARD_FUNCS
+        if self.use_reward_model:
+            self.reward_model = ReasoningRewardModel()
+        else:
+            self.reward_model = None
 
     def forward(
         self,
         reasoning_chain: torch.Tensor,
         target_chain: Optional[torch.Tensor] = None,
+        generated_texts: Optional[List[str]] = None,
+        target_robots: Optional[List[str]] = None,
     ) -> torch.Tensor:
         """
-        Compute reasoning consistency loss.
+        Compute reasoning consistency loss with optional reward signal.
 
         Args:
             reasoning_chain: Generated reasoning [B, steps, seq_len, dim]
             target_chain: Optional target reasoning
+            generated_texts: Optional list of generated text for reward calculation
+            target_robots: Optional list of target robot names for correctness reward
 
         Returns:
-            Consistency loss
+            Consistency loss with reward signal incorporated
         """
         # Encourage smooth transitions between steps
         if reasoning_chain.dim() == 4:
@@ -82,13 +110,62 @@ class ReasoningConsistencyLoss(nn.Module):
         # If target is provided, compute MSE
         if target_chain is not None:
             target_loss = F.mse_loss(reasoning_chain, target_chain)
-            return smoothness_loss + target_loss
+            total_loss = smoothness_loss + target_loss
+        else:
+            total_loss = smoothness_loss
 
-        return smoothness_loss
+        # If we have generated texts, incorporate reward signal as a loss modifier
+        if generated_texts is not None and self.reward_model is not None:
+            rewards = self.reward_model(generated_texts, target_robots)
+            if rewards:
+                mean_reward = sum(rewards) / len(rewards)
+                # Higher reward = lower loss modifier (reward ranges 0-5 typically)
+                reward_modifier = max(0.5, 2.0 - mean_reward / 2.5)
+                total_loss = total_loss * reward_modifier
+
+        return total_loss
+
+
+class XMLFormatLoss(nn.Module):
+    """
+    Loss function that encourages proper XML format in generated text.
+    Inspired by tiny-r1's reward functions.
+    """
+
+    def __init__(self):
+        super().__init__()
+        if HAS_REWARD_FUNCS:
+            from embervlm.training.reasoning_rewards import xml_count_reward, soft_format_reward
+            self.xml_count_reward = xml_count_reward
+            self.soft_format_reward = soft_format_reward
+        else:
+            self.xml_count_reward = None
+            self.soft_format_reward = None
+
+    def forward(self, generated_texts: List[str]) -> torch.Tensor:
+        """
+        Compute format loss based on XML structure.
+        Lower reward = higher loss.
+        """
+        if self.xml_count_reward is None:
+            return torch.tensor(0.0)
+
+        # Get XML count rewards (0-1 range)
+        xml_rewards = self.xml_count_reward(generated_texts)
+        format_rewards = self.soft_format_reward(generated_texts)
+
+        # Combine rewards
+        combined_rewards = [(x + f) / 2.0 for x, f in zip(xml_rewards, format_rewards)]
+
+        # Convert to loss (1 - reward)
+        mean_reward = sum(combined_rewards) / len(combined_rewards) if combined_rewards else 0.0
+        format_loss = 1.0 - mean_reward
+
+        return torch.tensor(format_loss)
 
 
 class Stage4Trainer:
-    """Trainer for Stage 4: Chain-of-Thought Reasoning."""
+    """Trainer for Stage 4: Chain-of-Thought Reasoning (DeepSeek-R1 style)."""
 
     def __init__(
         self,
@@ -123,13 +200,20 @@ class Stage4Trainer:
         # Phase tracking
         self.current_phase = 1
 
+        # Reward model (tiny-r1 style)
+        self.reward_model = None
+        if HAS_REWARD_FUNCS:
+            self.reward_model = ReasoningRewardModel()
+            logger.info("✓ Initialized reasoning reward model (tiny-r1 style)")
+
         # Optimizer (will be re-created for each phase)
         self.optimizer = None
         self.scheduler = None
         self.scaler = get_grad_scaler(config)
 
-        # Losses
-        self.reasoning_consistency_loss = ReasoningConsistencyLoss()
+        # Losses (with reward model integration)
+        self.reasoning_consistency_loss = ReasoningConsistencyLoss(use_reward_model=True)
+        self.xml_format_loss = XMLFormatLoss()
 
         # Logging - only main process initializes W&B and carbon tracker
         self.wandb_logger = None
@@ -175,6 +259,14 @@ class Stage4Trainer:
 
         self.metric_tracker = MetricTracker()
         self.global_step = 0
+
+        # Reward tracking for visualization
+        self.reward_history = {
+            'total': [],
+            'correctness': [],
+            'format': [],
+            'reasoning_quality': [],
+        }
 
         # Stage 4 specific visualizer
         self.stage_visualizer = None
@@ -469,12 +561,16 @@ class Stage4Trainer:
 
     @torch.no_grad()
     def evaluate(self):
-        """Evaluate reasoning quality."""
+        """Evaluate reasoning quality with reward-based metrics (DeepSeek-R1 style)."""
         if self.val_dataloader is None:
             return {}
 
         self.model.eval()
         eval_metrics = MetricTracker()
+
+        # Collect generated texts for reward evaluation
+        all_generated_texts = []
+        all_target_robots = []
 
         for batch in tqdm(
             self.val_dataloader,
@@ -488,6 +584,10 @@ class Stage4Trainer:
             robot_targets = batch.get('robot_target')
             if robot_targets is not None:
                 robot_targets = robot_targets.to(self.device)
+                # Convert to robot names for reward evaluation
+                target_names = batch.get('robot_target_names', [])
+                if target_names:
+                    all_target_robots.extend(target_names)
 
             with get_autocast_context(self.config):
                 outputs = self.model(
@@ -513,9 +613,44 @@ class Stage4Trainer:
         avg_metrics = eval_metrics.get_average()
         avg_metrics = {f'val_{k}': v for k, v in avg_metrics.items()}
 
+        # Compute reward-based metrics if reward model available
+        if self.reward_model is not None and all_generated_texts:
+            try:
+                detailed_rewards = self.reward_model.get_detailed_rewards(
+                    all_generated_texts,
+                    all_target_robots if all_target_robots else None
+                )
+
+                # Add reward metrics
+                for key, values in detailed_rewards.items():
+                    if values:
+                        avg_metrics[f'val_reward_{key}'] = sum(values) / len(values)
+
+                # Track for visualization
+                if 'total' in detailed_rewards:
+                    self.reward_history['total'].append(sum(detailed_rewards['total']) / len(detailed_rewards['total']))
+
+            except Exception as e:
+                logger.warning(f"Failed to compute reward metrics: {e}")
+
         if is_main_process():
             if self.wandb_logger is not None:
                 self.wandb_logger.log(avg_metrics, step=self.global_step)
+
+                # Log reward visualization if we have enough data
+                if len(self.reward_history['total']) >= 3 and hasattr(self.wandb_logger, 'log_custom_chart'):
+                    try:
+                        import wandb
+                        data = [[i, r] for i, r in enumerate(self.reward_history['total'])]
+                        table = wandb.Table(data=data, columns=["step", "reward"])
+                        self.wandb_logger.log({
+                            "stage4/reward_history": wandb.plot.line(
+                                table, "step", "reward", title="Reasoning Reward Over Time"
+                            )
+                        }, step=self.global_step)
+                    except Exception as e:
+                        logger.debug(f"Could not log reward chart: {e}")
+
             logger.info(f"Evaluation: {avg_metrics}")
 
         self.model.train()

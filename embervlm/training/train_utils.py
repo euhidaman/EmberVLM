@@ -681,7 +681,13 @@ def load_checkpoint(
     scaler: Optional[GradScaler] = None,
 ) -> int:
     """
-    Load training checkpoint.
+    Load training checkpoint with robust handling of architecture changes.
+
+    This function handles:
+    - Shape mismatches between checkpoint and model (layers will be randomly initialized)
+    - Missing keys (new layers added, will use model's initialization)
+    - Extra keys in checkpoint (old layers removed, will be ignored)
+    - Stage transitions where architecture changes (e.g., reasoning module changes)
 
     Args:
         model: Model to load into
@@ -699,7 +705,7 @@ def load_checkpoint(
     model_path = checkpoint_dir / 'pytorch_model.bin'
     if model_path.exists():
         model_to_load = unwrap_model(model)
-        state_dict = torch.load(model_path, map_location='cpu')
+        state_dict = torch.load(model_path, map_location='cpu', weights_only=False)
 
         # Filter out mismatched keys (e.g., when model architecture changes between stages)
         model_state_dict = model_to_load.state_dict()
@@ -718,27 +724,44 @@ def load_checkpoint(
                 # Key doesn't exist in current model (layer removed/renamed)
                 skipped_keys.append(key)
 
-        # Special handling for Stage 2 -> Stage 3 transition
-        # Stage 3 adds new reasoning module with different output dimensions
+        # Identify keys that will be missing (new layers in model not in checkpoint)
+        new_keys = []
+        for key in model_state_dict.keys():
+            if key not in filtered_state_dict:
+                new_keys.append(key)
+
+        # Special handling for Stage transitions
+        # Stage 2 -> Stage 3: reasoning module may have different output dimensions
+        # Stage 3 -> Stage 4: reasoning module architecture may be refined
         reasoning_module_keys = [k for k in mismatched_keys if 'reasoning_module' in k or 'robot_head' in k]
         if reasoning_module_keys:
-            logger.info(f"Detected reasoning module architecture change (Stage 2→3 transition)")
-            logger.info(f"Reasoning module will be randomly initialized: {len(reasoning_module_keys)} layers")
+            logger.info(f"Detected reasoning module architecture change (likely Stage transition)")
+            logger.info(f"Reasoning module layers will be randomly initialized: {len(reasoning_module_keys)} layer(s)")
+            for key_info in reasoning_module_keys:
+                logger.info(f"  - {key_info}")
+
+        # Log summary
+        logger.info(f"Checkpoint loading summary:")
+        logger.info(f"  - Total checkpoint keys: {len(state_dict)}")
+        logger.info(f"  - Compatible keys loaded: {len(filtered_state_dict)}")
+        logger.info(f"  - Shape mismatches (skipped): {len(mismatched_keys)}")
+        logger.info(f"  - Unknown checkpoint keys (skipped): {len(skipped_keys)}")
+        logger.info(f"  - New model keys (random init): {len(new_keys)}")
 
         # Load filtered state dict with strict=False to allow missing keys
-        missing_keys, unexpected_keys = model_to_load.load_state_dict(filtered_state_dict, strict=False)
+        # This MUST use filtered_state_dict (not original state_dict) to avoid shape errors
+        load_result = model_to_load.load_state_dict(filtered_state_dict, strict=False)
 
         logger.info(f"Loaded model weights from {model_path}")
         if mismatched_keys:
-            logger.warning(f"Skipped {len(mismatched_keys)} mismatched layer(s) - will be randomly initialized:")
-            for key_info in mismatched_keys[:5]:  # Show first 5
-                logger.warning(f"  - {key_info}")
-            if len(mismatched_keys) > 5:
-                logger.warning(f"  ... and {len(mismatched_keys) - 5} more")
-        if missing_keys:
-            logger.info(f"Missing keys (will use model's initialization): {len(missing_keys)} keys")
-        if unexpected_keys:
-            logger.info(f"Unexpected keys in checkpoint (ignored): {len(unexpected_keys)} keys")
+            logger.warning(f"Skipped {len(mismatched_keys)} mismatched layer(s) - will be randomly initialized")
+        if load_result.missing_keys:
+            # Filter to show only significant missing keys (not the ones we know about)
+            significant_missing = [k for k in load_result.missing_keys if k not in new_keys]
+            if significant_missing:
+                logger.info(f"Missing keys in checkpoint (using model's random init): {len(significant_missing)} keys")
+        if load_result.unexpected_keys:
+            logger.info(f"Unexpected keys in checkpoint (ignored): {len(load_result.unexpected_keys)} keys")
 
     # Load training state
     state_path = checkpoint_dir / 'training_state.pt'
