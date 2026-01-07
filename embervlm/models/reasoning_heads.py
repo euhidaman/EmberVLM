@@ -191,7 +191,13 @@ class ReasoningHead(nn.Module):
 
 class RobotSelectionHead(nn.Module):
     """
-    Head for selecting optimal robot from fleet.
+    Head for selecting optimal robot(s) from fleet with top-N ranking.
+
+    Supports:
+    - Single robot selection (classification)
+    - Multi-robot selection (multi-label)
+    - Top-N robot ranking with scores
+    - Reasoning-aware selection
     """
 
     def __init__(
@@ -205,7 +211,7 @@ class RobotSelectionHead(nn.Module):
 
         self.num_robots = num_robots
 
-        # Feature extraction
+        # Feature extraction with more capacity
         self.feature_net = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
@@ -214,33 +220,42 @@ class RobotSelectionHead(nn.Module):
             nn.Linear(hidden_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.GELU(),
+            nn.Dropout(dropout),
         )
 
-        # Robot classification
+        # Robot classification (single robot)
         self.classifier = nn.Linear(hidden_dim, num_robots)
 
-        # Confidence estimation
+        # Multi-robot selection (can select multiple robots)
+        self.multi_robot_classifier = nn.Linear(hidden_dim, num_robots)
+
+        # Confidence estimation (per-robot confidence)
         self.confidence = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.GELU(),
-            nn.Linear(hidden_dim // 2, 1),
+            nn.Linear(hidden_dim // 2, num_robots),
             nn.Sigmoid(),
         )
+
+        # Robot-specific reasoning context
+        self.robot_context = nn.Parameter(torch.randn(num_robots, hidden_dim) * 0.02)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
+        top_k: int = 3,
     ) -> Dict[str, torch.Tensor]:
         """
-        Select robot from fleet.
+        Select robot(s) from fleet with ranking.
 
         Args:
             hidden_states: Input hidden states [B, seq_len, input_dim]
             attention_mask: Optional attention mask
+            top_k: Number of top robots to return in ranking
 
         Returns:
-            Dictionary containing robot selection outputs
+            Dictionary containing robot selection outputs with top-N ranking
         """
         # Pool across sequence
         if attention_mask is not None:
@@ -252,16 +267,36 @@ class RobotSelectionHead(nn.Module):
         # Extract features
         features = self.feature_net(pooled)
 
-        # Robot logits
+        # Robot logits (single selection)
         robot_logits = self.classifier(features)
+        robot_probs = F.softmax(robot_logits, dim=-1)
 
-        # Confidence score
+        # Multi-robot logits (multi-label selection)
+        multi_robot_logits = self.multi_robot_classifier(features)
+        multi_robot_probs = torch.sigmoid(multi_robot_logits)
+
+        # Per-robot confidence scores
         confidence = self.confidence(features)
+
+        # Top-K robot selection with scores
+        top_k = min(top_k, self.num_robots)
+        top_scores, top_indices = torch.topk(robot_probs, top_k, dim=-1)
+
+        # Compute robot-specific attention for reasoning
+        # This helps explain WHY each robot was selected
+        batch_size = features.size(0)
+        robot_attention = torch.einsum('bh,rh->br', features, self.robot_context)
+        robot_attention = F.softmax(robot_attention, dim=-1)
 
         return {
             'robot_logits': robot_logits,
-            'robot_probs': F.softmax(robot_logits, dim=-1),
+            'robot_probs': robot_probs,
+            'multi_robot_logits': multi_robot_logits,
+            'multi_robot_probs': multi_robot_probs,
             'confidence': confidence,
+            'top_k_indices': top_indices,  # [B, top_k]
+            'top_k_scores': top_scores,    # [B, top_k]
+            'robot_attention': robot_attention,  # [B, num_robots] - for interpretability
             'features': features,
         }
 
@@ -480,7 +515,12 @@ class ReasoningModule(nn.Module):
             outputs.update({
                 'robot_logits': robot_outputs['robot_logits'],
                 'robot_probs': robot_outputs['robot_probs'],
+                'multi_robot_logits': robot_outputs['multi_robot_logits'],
+                'multi_robot_probs': robot_outputs['multi_robot_probs'],
                 'robot_confidence': robot_outputs['confidence'],
+                'top_k_indices': robot_outputs['top_k_indices'],
+                'top_k_scores': robot_outputs['top_k_scores'],
+                'robot_attention': robot_outputs['robot_attention'],
             })
             robot_features = robot_outputs['features']
         else:
@@ -511,9 +551,87 @@ class ReasoningModule(nn.Module):
         return {'total': total, 'trainable': trainable}
 
 
+class FocalLoss(nn.Module):
+    """
+    Focal Loss for handling class imbalance in robot selection.
+
+    FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
+
+    This helps prevent the model from collapsing to always predicting
+    the majority class (e.g., Drone).
+    """
+
+    def __init__(
+        self,
+        num_classes: int = 5,
+        alpha: Optional[torch.Tensor] = None,
+        gamma: float = 2.0,
+        reduction: str = 'mean',
+        label_smoothing: float = 0.1,
+    ):
+        super().__init__()
+        self.num_classes = num_classes
+        self.gamma = gamma
+        self.reduction = reduction
+        self.label_smoothing = label_smoothing
+
+        # Class weights - can be set dynamically based on class distribution
+        if alpha is None:
+            # Default balanced weights
+            self.register_buffer('alpha', torch.ones(num_classes))
+        else:
+            self.register_buffer('alpha', alpha)
+
+    def set_class_weights(self, class_counts: torch.Tensor):
+        """Set class weights inversely proportional to class frequency."""
+        # Inverse frequency weighting
+        total = class_counts.sum()
+        weights = total / (self.num_classes * class_counts.clamp(min=1))
+        # Normalize so mean weight is 1
+        weights = weights / weights.mean()
+        self.alpha = weights.to(self.alpha.device)
+
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            inputs: Logits [B, num_classes]
+            targets: Class indices [B]
+        """
+        # Apply label smoothing
+        if self.label_smoothing > 0:
+            num_classes = inputs.size(-1)
+            smooth_targets = torch.zeros_like(inputs).scatter_(
+                1, targets.unsqueeze(1), 1.0
+            )
+            smooth_targets = smooth_targets * (1 - self.label_smoothing) + \
+                           self.label_smoothing / num_classes
+
+        # Compute softmax probabilities
+        p = F.softmax(inputs, dim=-1)
+
+        # Get probabilities for target class
+        ce_loss = F.cross_entropy(inputs, targets, reduction='none')
+        p_t = p.gather(1, targets.unsqueeze(1)).squeeze(1)
+
+        # Focal weight
+        focal_weight = (1 - p_t) ** self.gamma
+
+        # Class weight
+        alpha_t = self.alpha.gather(0, targets)
+
+        # Combined loss
+        loss = alpha_t * focal_weight * ce_loss
+
+        if self.reduction == 'mean':
+            return loss.mean()
+        elif self.reduction == 'sum':
+            return loss.sum()
+        return loss
+
+
 class ReasoningLoss(nn.Module):
     """
-    Loss functions for reasoning module.
+    Loss functions for reasoning module with focal loss for class balancing.
     """
 
     def __init__(
@@ -523,6 +641,9 @@ class ReasoningLoss(nn.Module):
         robot_weight: float = 1.0,
         action_weight: float = 1.0,
         consistency_weight: float = 0.5,
+        use_focal_loss: bool = True,
+        focal_gamma: float = 2.0,
+        label_smoothing: float = 0.1,
     ):
         super().__init__()
 
@@ -530,9 +651,27 @@ class ReasoningLoss(nn.Module):
         self.robot_weight = robot_weight
         self.action_weight = action_weight
         self.consistency_weight = consistency_weight
+        self.use_focal_loss = use_focal_loss
 
-        self.robot_criterion = nn.CrossEntropyLoss()
+        # Use focal loss for better class balancing
+        if use_focal_loss:
+            self.robot_criterion = FocalLoss(
+                num_classes=num_robots,
+                gamma=focal_gamma,
+                label_smoothing=label_smoothing,
+            )
+        else:
+            self.robot_criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
+
         self.action_criterion = nn.MSELoss()
+
+        # Multi-robot loss (binary cross entropy for multi-hot targets)
+        self.multi_robot_criterion = nn.BCEWithLogitsLoss()
+
+    def set_class_weights(self, class_counts: torch.Tensor):
+        """Set class weights for focal loss."""
+        if self.use_focal_loss and hasattr(self.robot_criterion, 'set_class_weights'):
+            self.robot_criterion.set_class_weights(class_counts)
 
     def forward(
         self,
@@ -552,7 +691,7 @@ class ReasoningLoss(nn.Module):
         losses = {}
         total_loss = 0.0
 
-        # Robot selection loss
+        # Robot selection loss (single robot)
         if 'robot_logits' in outputs and 'robot_target' in targets:
             robot_loss = self.robot_criterion(
                 outputs['robot_logits'],
@@ -560,6 +699,15 @@ class ReasoningLoss(nn.Module):
             )
             losses['robot_loss'] = robot_loss
             total_loss = total_loss + self.robot_weight * robot_loss
+
+        # Multi-robot selection loss (multiple robots)
+        if 'multi_robot_logits' in outputs and 'multi_robot_target' in targets:
+            multi_loss = self.multi_robot_criterion(
+                outputs['multi_robot_logits'],
+                targets['multi_robot_target'].float()
+            )
+            losses['multi_robot_loss'] = multi_loss
+            total_loss = total_loss + self.robot_weight * multi_loss
 
         # Action planning loss
         if 'plan_steps' in outputs and 'action_target' in targets:

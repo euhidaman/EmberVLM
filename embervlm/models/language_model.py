@@ -912,35 +912,35 @@ class PretrainedTinyLLMBackbone(nn.Module):
         """Get token embeddings with validation to prevent index out of bounds."""
         embedding_layer = self.model.get_input_embeddings()
         vocab_size = embedding_layer.weight.shape[0]
+        original_device = input_ids.device
 
-        # CRITICAL: Create a clean copy and validate BEFORE any CUDA operations
-        # This prevents async CUDA execution from using the original invalid tensor
-        input_ids = input_ids.clone()
+        # CRITICAL FIX: Round-trip through CPU for guaranteed safety
+        # This completely avoids CUDA async issues with tensor modifications
+        input_ids_cpu = input_ids.detach().cpu()
 
-        # Check for out-of-bounds tokens
-        invalid_mask = (input_ids >= vocab_size) | (input_ids < 0)
+        # Check and fix any invalid values on CPU (guaranteed synchronous)
+        max_val = input_ids_cpu.max().item()
+        min_val = input_ids_cpu.min().item()
 
-        if invalid_mask.any():
+        if max_val >= vocab_size or min_val < 0:
             import logging
             logger = logging.getLogger(__name__)
-
-            max_token_id = input_ids.max().item()
-            min_token_id = input_ids.min().item()
-            num_invalid = invalid_mask.sum().item()
-
+            num_invalid = ((input_ids_cpu >= vocab_size) | (input_ids_cpu < 0)).sum().item()
             logger.warning(
-                f"⚠️ PretrainedTinyLLMBackbone.embed_tokens: {num_invalid} invalid tokens. "
-                f"Range: [{min_token_id}, {max_token_id}], Valid: [0, {vocab_size - 1}]. Replacing with 0."
+                f"⚠️ embed_tokens: {num_invalid} invalid tokens. "
+                f"Range: [{min_val}, {max_val}], Valid: [0, {vocab_size - 1}]. Clamping."
             )
+            # Clamp on CPU - guaranteed synchronous
+            input_ids_cpu = torch.clamp(input_ids_cpu, min=0, max=vocab_size - 1)
 
-            # Replace invalid tokens with 0 (safer than clamping at boundaries)
-            input_ids = torch.where(invalid_mask, torch.zeros_like(input_ids), input_ids)
+        # Move back to original device with blocking transfer
+        input_ids_safe = input_ids_cpu.to(original_device, non_blocking=False)
 
-            # Force CUDA sync to ensure the fix is applied
-            if input_ids.is_cuda:
-                torch.cuda.synchronize(input_ids.device)
+        # Final sync before embedding lookup
+        if original_device.type == 'cuda':
+            torch.cuda.synchronize(original_device)
 
-        return embedding_layer(input_ids)
+        return embedding_layer(input_ids_safe)
 
     def forward(
         self,

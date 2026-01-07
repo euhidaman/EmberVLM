@@ -168,7 +168,7 @@ class Stage3Trainer:
         self.scheduler = get_scheduler(self.optimizer, config)
         self.scaler = get_grad_scaler(config)
 
-        # Reasoning loss
+        # Reasoning loss with focal loss for class balancing
         model_ref = self.model.module if hasattr(self.model, 'module') else self.model
         self.reasoning_loss = ReasoningLoss(
             num_robots=model_ref.config.num_robots,
@@ -176,7 +176,13 @@ class Stage3Trainer:
             robot_weight=1.0,
             action_weight=1.0,
             consistency_weight=0.5,
+            use_focal_loss=True,  # Use focal loss for class imbalance
+            focal_gamma=2.0,
+            label_smoothing=0.1,
         )
+
+        # Compute class weights from training data
+        self._compute_class_weights()
 
         # Loss weights
         self.ce_weight = 0.6
@@ -252,6 +258,30 @@ class Stage3Trainer:
 
         if is_main_process():
             print_trainable_parameters(self.model)
+
+    def _compute_class_weights(self):
+        """Compute class weights from training data for focal loss."""
+        try:
+            # Count samples per class
+            class_counts = torch.zeros(5, dtype=torch.float32)
+
+            for batch in self.robot_dataloader:
+                targets = batch.get('robot_target')
+                if targets is not None:
+                    for t in targets:
+                        if 0 <= t < 5:
+                            class_counts[t] += 1
+
+            # Set class weights in reasoning loss
+            if class_counts.sum() > 0:
+                self.reasoning_loss.set_class_weights(class_counts)
+
+                if is_main_process():
+                    logger.info(f"Class distribution: {class_counts.tolist()}")
+                    if hasattr(self.reasoning_loss.robot_criterion, 'alpha'):
+                        logger.info(f"Class weights: {self.reasoning_loss.robot_criterion.alpha.tolist()}")
+        except Exception as e:
+            logger.warning(f"Could not compute class weights: {e}")
 
     def _validate_and_fix_tokens(self, input_ids: torch.Tensor, labels: torch.Tensor) -> tuple:
         """Validate and fix token IDs before model forward pass.
@@ -372,6 +402,18 @@ class Stage3Trainer:
                 self.last_robot_preds = robot_preds.detach()
                 self.last_robot_targets = robot_targets.detach()
                 self.last_confidences = torch.softmax(outputs['robot_logits'], dim=-1).max(dim=-1)[0].detach()
+
+                # Store top-k predictions if available
+                if 'top_k_indices' in outputs:
+                    self.last_topk_indices = outputs['top_k_indices'].detach()
+                    self.last_topk_scores = outputs['top_k_scores'].detach()
+
+                # Store multi-robot outputs for multi-label evaluation
+                if 'multi_robot_logits' in outputs and multi_robot_targets is not None:
+                    multi_preds = torch.sigmoid(outputs['multi_robot_logits']) > 0.5
+                    multi_acc = ((multi_preds == multi_robot_targets.bool()).float().mean())
+                    self.last_multi_robot_preds = outputs['multi_robot_logits'].detach()
+                    self.last_multi_robot_targets = multi_robot_targets.detach()
             else:
                 robot_acc = torch.tensor(0.0)
 

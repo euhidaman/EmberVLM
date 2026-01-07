@@ -282,37 +282,30 @@ class EmberVLM(nn.Module):
         batch_size, seq_len = input_ids.size()
         device = input_ids.device
 
-        # CRITICAL: Clone input_ids FIRST to avoid modifying the original tensor
-        # This prevents issues with CUDA async execution
-        input_ids = input_ids.clone()
-
-        # Validate and fix input_ids BEFORE any embedding lookup
+        # CRITICAL FIX: Use CPU round-trip for guaranteed safety against CUDA async issues
         vocab_size = self.language_model.get_input_embeddings().weight.shape[0]
 
-        # Create a mask of invalid tokens (out of bounds)
-        invalid_mask = (input_ids >= vocab_size) | (input_ids < 0)
+        # Move to CPU, validate, clamp, then move back (fully synchronous)
+        input_ids_cpu = input_ids.detach().cpu()
+        max_val = input_ids_cpu.max().item()
+        min_val = input_ids_cpu.min().item()
 
-        if invalid_mask.any():
+        if max_val >= vocab_size or min_val < 0:
             import logging
             logger = logging.getLogger(__name__)
-
-            # Count and log invalid tokens
-            num_invalid = invalid_mask.sum().item()
-            max_token_id = input_ids.max().item()
-            min_token_id = input_ids.min().item()
-
+            num_invalid = ((input_ids_cpu >= vocab_size) | (input_ids_cpu < 0)).sum().item()
             logger.error(
-                f"❌ CRITICAL: {num_invalid} invalid token IDs detected! "
-                f"Range: [{min_token_id}, {max_token_id}], Valid: [0, {vocab_size - 1}]. "
-                f"Replacing with 0 to prevent CUDA crash."
+                f"❌ prepare_inputs_embeds: {num_invalid} invalid token IDs! "
+                f"Range: [{min_val}, {max_val}], Valid: [0, {vocab_size - 1}]. Clamping."
             )
+            input_ids_cpu = torch.clamp(input_ids_cpu, min=0, max=vocab_size - 1)
 
-            # Replace invalid tokens with 0 (safer than pad token which might not exist)
-            input_ids = torch.where(invalid_mask, torch.zeros_like(input_ids), input_ids)
+        # Move back with blocking transfer
+        input_ids = input_ids_cpu.to(device, non_blocking=False)
 
-            # Force synchronization to ensure the fix is applied before embedding lookup
-            if device.type == 'cuda':
-                torch.cuda.synchronize(device)
+        # Sync before any embedding operations
+        if device.type == 'cuda':
+            torch.cuda.synchronize(device)
 
         # Get text embeddings - now safe to call
         text_embeds = self.language_model.embed_tokens(input_ids)
@@ -624,7 +617,12 @@ class EmberVLM(nn.Module):
             outputs.update({
                 'robot_logits': reasoning_outputs.get('robot_logits'),
                 'robot_probs': reasoning_outputs.get('robot_probs'),
+                'multi_robot_logits': reasoning_outputs.get('multi_robot_logits'),
+                'multi_robot_probs': reasoning_outputs.get('multi_robot_probs'),
                 'robot_confidence': reasoning_outputs.get('robot_confidence'),
+                'top_k_indices': reasoning_outputs.get('top_k_indices'),
+                'top_k_scores': reasoning_outputs.get('top_k_scores'),
+                'robot_attention': reasoning_outputs.get('robot_attention'),
                 'plan_steps': reasoning_outputs.get('plan_steps'),
                 'plan_coherence': reasoning_outputs.get('plan_coherence'),
             })
@@ -782,6 +780,155 @@ class EmberVLM(nn.Module):
             result['reasoning_chain'] = outputs['reasoning_chain']
 
         return result
+
+    @torch.no_grad()
+    def select_robots_topn(
+        self,
+        pixel_values: torch.Tensor,
+        task_text: Optional[str] = None,
+        tokenizer: Any = None,
+        top_n: int = 3,
+        return_reasoning: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Select top-N robots for a task with reasoning explanation.
+
+        This method provides ranked robot recommendations with confidence
+        scores and optional reasoning for each selection.
+
+        Args:
+            pixel_values: Input image [1, C, H, W] or [B, C, H, W]
+            task_text: Optional task description text
+            tokenizer: Tokenizer for encoding task text
+            top_n: Number of top robots to return (default: 3)
+            return_reasoning: Whether to include reasoning chain
+
+        Returns:
+            Dictionary containing:
+            - top_robots: List of (robot_name, score, confidence) tuples
+            - selected_robot: Top-1 robot name (backward compatible)
+            - robot_index: Top-1 robot index
+            - all_scores: All robot scores as dict
+            - reasoning_summary: Brief text explanation (if available)
+            - reasoning_chain: Full reasoning tensors (if return_reasoning=True)
+        """
+        device = pixel_values.device
+        batch_size = pixel_values.size(0)
+
+        # Use vision-only forward for robustness
+        outputs = self.forward_vision_only(
+            pixel_values=pixel_values,
+            return_reasoning=return_reasoning,
+        )
+
+        results = []
+
+        for b in range(batch_size):
+            result = {}
+
+            # Get top-N robots
+            if 'top_k_indices' in outputs and 'top_k_scores' in outputs:
+                top_indices = outputs['top_k_indices'][b][:top_n]
+                top_scores = outputs['top_k_scores'][b][:top_n]
+            else:
+                # Fallback to manual top-k
+                probs = outputs['robot_probs'][b]
+                top_scores, top_indices = torch.topk(probs, min(top_n, self.config.num_robots))
+
+            # Build top robots list
+            top_robots = []
+            for idx, (robot_idx, score) in enumerate(zip(top_indices, top_scores)):
+                robot_name = self.config.robot_names[robot_idx.item()]
+                confidence = outputs['robot_confidence'][b, robot_idx].item() if outputs.get('robot_confidence') is not None and outputs['robot_confidence'].dim() > 1 else score.item()
+                top_robots.append({
+                    'rank': idx + 1,
+                    'robot_name': robot_name,
+                    'robot_index': robot_idx.item(),
+                    'score': score.item(),
+                    'confidence': confidence,
+                })
+
+            result['top_robots'] = top_robots
+
+            # Backward compatible fields
+            if top_robots:
+                result['selected_robot'] = top_robots[0]['robot_name']
+                result['robot_index'] = top_robots[0]['robot_index']
+                result['confidence'] = top_robots[0]['confidence']
+
+            # All scores
+            probs = outputs['robot_probs'][b]
+            result['all_scores'] = {
+                name: probs[i].item()
+                for i, name in enumerate(self.config.robot_names)
+            }
+
+            # Robot attention for interpretability
+            if 'robot_attention' in outputs:
+                attention = outputs['robot_attention'][b]
+                result['robot_attention'] = {
+                    name: attention[i].item()
+                    for i, name in enumerate(self.config.robot_names)
+                }
+
+            # Multi-robot selection (for tasks needing multiple robots)
+            if 'multi_robot_probs' in outputs:
+                multi_probs = outputs['multi_robot_probs'][b]
+                selected_multi = (multi_probs > 0.5).nonzero().squeeze(-1)
+                result['multi_robot_selection'] = [
+                    self.config.robot_names[i.item()] for i in selected_multi
+                ] if selected_multi.numel() > 0 else []
+
+            # Generate reasoning summary
+            result['reasoning_summary'] = self._generate_reasoning_summary(
+                top_robots[0]['robot_name'] if top_robots else "Unknown",
+                task_text,
+                result.get('robot_attention', {})
+            )
+
+            # Include reasoning chain if requested
+            if return_reasoning and 'reasoning_chain' in outputs:
+                result['reasoning_chain'] = outputs['reasoning_chain'][b]
+
+            # Plan coherence
+            if 'plan_coherence' in outputs:
+                result['plan_coherence'] = outputs['plan_coherence'][b].item()
+
+            results.append(result)
+
+        # Return single result for batch_size=1, otherwise list
+        return results[0] if batch_size == 1 else results
+
+    def _generate_reasoning_summary(
+        self,
+        selected_robot: str,
+        task_text: Optional[str],
+        robot_attention: Dict[str, float],
+    ) -> str:
+        """Generate a brief text summary explaining the robot selection."""
+        # Simple template-based reasoning (can be enhanced with LLM generation)
+        robot_capabilities = {
+            "Drone": "aerial navigation, surveillance, and quick deployment",
+            "Underwater Robot": "underwater exploration and marine operations",
+            "Humanoid": "manipulation, tool use, and human interaction",
+            "Robot with Wheels": "efficient transport on flat surfaces",
+            "Robot with Legs": "rough terrain navigation and climbing",
+        }
+
+        capability = robot_capabilities.get(selected_robot, "specialized capabilities")
+
+        # Sort by attention for explanation
+        if robot_attention:
+            sorted_robots = sorted(robot_attention.items(), key=lambda x: x[1], reverse=True)
+            top_robot = sorted_robots[0][0]
+            reason = f"Based on visual analysis, {selected_robot} is recommended for its {capability}."
+        else:
+            reason = f"{selected_robot} is selected for its {capability}."
+
+        if task_text:
+            reason += f" The task '{task_text[:50]}...' requires these specific abilities." if len(task_text) > 50 else f" The task '{task_text}' requires these specific abilities."
+
+        return reason
 
     def count_parameters(self) -> Dict[str, int]:
         """Count model parameters."""
