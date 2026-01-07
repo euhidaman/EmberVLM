@@ -1,5 +1,13 @@
 """
 EmberVLM Monitoring Package
+
+Provides comprehensive monitoring and visualization tools for training:
+- W&B logging with advanced visualizations
+- Carbon footprint tracking
+- FLOPs counting
+- Attention visualization
+- Stage-specific visualizations
+- Advanced 3D plots and publication-quality figures
 """
 
 from embervlm.monitoring.wandb_logger import WandbLogger, EnhancedWandbLogger
@@ -14,6 +22,7 @@ from embervlm.monitoring.stage_visualizations import (
     Stage4Visualizer,
     CrossStageVisualizer,
 )
+from embervlm.monitoring.advanced_visualizations import AdvancedVisualizer
 
 __all__ = [
     "WandbLogger",
@@ -29,5 +38,6 @@ __all__ = [
     "Stage3Visualizer",
     "Stage4Visualizer",
     "CrossStageVisualizer",
+    "AdvancedVisualizer",
 ]
 

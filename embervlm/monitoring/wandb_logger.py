@@ -1367,3 +1367,443 @@ Modules with Gradients: {sum(1 for v in module_stats.values() if v['grads'])}
 
         except Exception as e:
             logger.warning(f"Failed to log metrics table: {e}")
+
+    # ==================== ADVANCED VISUALIZATIONS ====================
+
+    def log_layer_training_dynamics_3d(
+        self,
+        accuracy_data,
+        layer_names: List[str] = None,
+        step_labels: List[int] = None,
+        robot_name: str = None,
+        step: int = None,
+    ):
+        """
+        Log 3D surface plot of layer-wise training dynamics to W&B.
+
+        Args:
+            accuracy_data: 2D array [n_layers, n_steps]
+            layer_names: Layer names
+            step_labels: Training step labels
+            robot_name: Robot type for coloring
+            step: Current step for logging
+        """
+        if not self.enabled:
+            return
+
+        try:
+            from embervlm.monitoring.advanced_visualizations import AdvancedVisualizer
+            import numpy as np
+
+            if not hasattr(self, 'advanced_viz'):
+                self.advanced_viz = AdvancedVisualizer()
+
+            title = f"Layer-wise Training Dynamics"
+            if robot_name:
+                title += f" - {robot_name}"
+
+            _, img = self.advanced_viz.plot_layer_training_dynamics_3d(
+                np.array(accuracy_data), layer_names, step_labels,
+                title=title, robot_name=robot_name, save=True
+            )
+
+            key = f"advanced/layer_dynamics_3d_{robot_name}" if robot_name else "advanced/layer_dynamics_3d"
+            self.log_image(key, img, step=step)
+            logger.info(f"✓ Logged 3D layer dynamics to W&B")
+
+        except Exception as e:
+            logger.warning(f"Failed to log 3D layer dynamics: {e}")
+
+    def log_multi_robot_3d_surfaces(
+        self,
+        robot_accuracy_data: Dict[str, Any],
+        layer_names: List[str] = None,
+        step_labels: List[int] = None,
+        step: int = None,
+    ):
+        """
+        Log multi-panel 3D surface plots for all robot types.
+
+        Args:
+            robot_accuracy_data: {robot_name: [n_layers, n_steps] array}
+            layer_names: Layer names
+            step_labels: Training step labels
+            step: Current step
+        """
+        if not self.enabled:
+            return
+
+        try:
+            from embervlm.monitoring.advanced_visualizations import AdvancedVisualizer
+
+            if not hasattr(self, 'advanced_viz'):
+                self.advanced_viz = AdvancedVisualizer()
+
+            _, img = self.advanced_viz.plot_multi_robot_3d_surfaces(
+                robot_accuracy_data, layer_names, step_labels, save=True
+            )
+            self.log_image("advanced/multi_robot_3d_surfaces", img, step=step)
+            logger.info(f"✓ Logged multi-robot 3D surfaces to W&B")
+
+        except Exception as e:
+            logger.warning(f"Failed to log multi-robot 3D surfaces: {e}")
+
+    def log_frozen_trained_comparison(
+        self,
+        frozen_metrics: Dict[str, float],
+        trained_metrics: Dict[str, float],
+        categories: List[str] = None,
+        step: int = None,
+    ):
+        """
+        Log frozen vs trained comparison chart.
+
+        Args:
+            frozen_metrics: Metrics with frozen backbone
+            trained_metrics: Metrics with trained backbone
+            categories: Categories to compare
+            step: Current step
+        """
+        if not self.enabled:
+            return
+
+        try:
+            from embervlm.monitoring.advanced_visualizations import AdvancedVisualizer
+
+            if not hasattr(self, 'advanced_viz'):
+                self.advanced_viz = AdvancedVisualizer()
+
+            _, img = self.advanced_viz.plot_frozen_trained_comparison(
+                frozen_metrics, trained_metrics, categories, save=True
+            )
+            self.log_image("advanced/frozen_trained_comparison", img, step=step)
+            logger.info(f"✓ Logged frozen vs trained comparison to W&B")
+
+        except Exception as e:
+            logger.warning(f"Failed to log frozen/trained comparison: {e}")
+
+    def log_layer_importance_ranks(
+        self,
+        importance_scores: Dict[str, Any],
+        layer_names: List[str] = None,
+        step: int = None,
+    ):
+        """
+        Log layer importance rank distribution.
+
+        Args:
+            importance_scores: {method: [layer_scores]}
+            layer_names: Layer names
+            step: Current step
+        """
+        if not self.enabled:
+            return
+
+        try:
+            from embervlm.monitoring.advanced_visualizations import AdvancedVisualizer
+
+            if not hasattr(self, 'advanced_viz'):
+                self.advanced_viz = AdvancedVisualizer()
+
+            _, img = self.advanced_viz.plot_layer_budget_rank_distribution(
+                importance_scores, layer_names, save=True
+            )
+            self.log_image("advanced/layer_importance_ranks", img, step=step)
+            logger.info(f"✓ Logged layer importance ranks to W&B")
+
+        except Exception as e:
+            logger.warning(f"Failed to log layer importance ranks: {e}")
+
+    def log_pareto_frontier(
+        self,
+        models: Dict[str, Dict[str, float]],
+        highlight_model: str = "EmberVLM",
+        step: int = None,
+    ):
+        """
+        Log Pareto frontier analysis.
+
+        Args:
+            models: {model_name: {metric: value}}
+            highlight_model: Model to highlight
+            step: Current step
+        """
+        if not self.enabled:
+            return
+
+        try:
+            from embervlm.monitoring.advanced_visualizations import AdvancedVisualizer
+
+            if not hasattr(self, 'advanced_viz'):
+                self.advanced_viz = AdvancedVisualizer()
+
+            _, img = self.advanced_viz.plot_pareto_frontier(
+                models, highlight_model=highlight_model, save=True
+            )
+            self.log_image("advanced/pareto_frontier", img, step=step)
+            logger.info(f"✓ Logged Pareto frontier to W&B")
+
+        except Exception as e:
+            logger.warning(f"Failed to log Pareto frontier: {e}")
+
+    def log_ablation_tornado(
+        self,
+        ablation_results: Dict[str, float],
+        baseline: float,
+        step: int = None,
+    ):
+        """
+        Log ablation study tornado chart.
+
+        Args:
+            ablation_results: {component_removed: accuracy}
+            baseline: Baseline accuracy
+            step: Current step
+        """
+        if not self.enabled:
+            return
+
+        try:
+            from embervlm.monitoring.advanced_visualizations import AdvancedVisualizer
+
+            if not hasattr(self, 'advanced_viz'):
+                self.advanced_viz = AdvancedVisualizer()
+
+            _, img = self.advanced_viz.plot_ablation_tornado(
+                ablation_results, baseline, save=True
+            )
+            self.log_image("advanced/ablation_tornado", img, step=step)
+            logger.info(f"✓ Logged ablation tornado to W&B")
+
+        except Exception as e:
+            logger.warning(f"Failed to log ablation tornado: {e}")
+
+    def log_confusion_evolution(
+        self,
+        confusion_matrices: List,
+        step_labels: List[int],
+        class_names: List[str],
+        step: int = None,
+    ):
+        """
+        Log confusion matrix evolution over training.
+
+        Args:
+            confusion_matrices: List of confusion matrices
+            step_labels: Step for each matrix
+            class_names: Class names
+            step: Current step
+        """
+        if not self.enabled:
+            return
+
+        try:
+            from embervlm.monitoring.advanced_visualizations import AdvancedVisualizer
+
+            if not hasattr(self, 'advanced_viz'):
+                self.advanced_viz = AdvancedVisualizer()
+
+            _, img = self.advanced_viz.plot_confusion_evolution(
+                confusion_matrices, step_labels, class_names, save=True
+            )
+            self.log_image("advanced/confusion_evolution", img, step=step)
+            logger.info(f"✓ Logged confusion evolution to W&B")
+
+        except Exception as e:
+            logger.warning(f"Failed to log confusion evolution: {e}")
+
+    def log_benchmark_heatmap(
+        self,
+        results: Dict[int, Dict[str, float]],
+        step: int = None,
+    ):
+        """
+        Log benchmark performance heatmap across stages.
+
+        Args:
+            results: {stage: {benchmark: score}}
+            step: Current step
+        """
+        if not self.enabled:
+            return
+
+        try:
+            from embervlm.monitoring.advanced_visualizations import AdvancedVisualizer
+
+            if not hasattr(self, 'advanced_viz'):
+                self.advanced_viz = AdvancedVisualizer()
+
+            _, img = self.advanced_viz.plot_benchmark_heatmap(results, save=True)
+            self.log_image("advanced/benchmark_heatmap", img, step=step)
+            logger.info(f"✓ Logged benchmark heatmap to W&B")
+
+        except Exception as e:
+            logger.warning(f"Failed to log benchmark heatmap: {e}")
+
+    def log_task_robot_heatmap(
+        self,
+        performance: Dict[str, Dict[str, float]],
+        step: int = None,
+    ):
+        """
+        Log task type vs robot performance heatmap.
+
+        Args:
+            performance: {task_type: {robot: accuracy}}
+            step: Current step
+        """
+        if not self.enabled:
+            return
+
+        try:
+            from embervlm.monitoring.advanced_visualizations import AdvancedVisualizer
+
+            if not hasattr(self, 'advanced_viz'):
+                self.advanced_viz = AdvancedVisualizer()
+
+            _, img = self.advanced_viz.plot_task_robot_performance_heatmap(
+                performance, save=True
+            )
+            self.log_image("advanced/task_robot_heatmap", img, step=step)
+            logger.info(f"✓ Logged task-robot heatmap to W&B")
+
+        except Exception as e:
+            logger.warning(f"Failed to log task-robot heatmap: {e}")
+
+    def log_image_text_similarity_3d(
+        self,
+        similarity_history: List,
+        step_labels: List[int] = None,
+        step: int = None,
+    ):
+        """
+        Log 3D surface of image-text similarity evolution.
+
+        Args:
+            similarity_history: List of similarity arrays per step
+            step_labels: Training step labels
+            step: Current step
+        """
+        if not self.enabled:
+            return
+
+        try:
+            from embervlm.monitoring.advanced_visualizations import AdvancedVisualizer
+
+            if not hasattr(self, 'advanced_viz'):
+                self.advanced_viz = AdvancedVisualizer()
+
+            _, img = self.advanced_viz.plot_image_text_similarity_evolution_3d(
+                similarity_history, step_labels, save=True
+            )
+            self.log_image("advanced/similarity_evolution_3d", img, step=step)
+            logger.info(f"✓ Logged similarity evolution 3D to W&B")
+
+        except Exception as e:
+            logger.warning(f"Failed to log similarity evolution 3D: {e}")
+
+    def log_comprehensive_stage_summary(
+        self,
+        stage: int,
+        metrics: Dict[str, Any],
+        step: int,
+        confusion_matrix = None,
+        class_names: List[str] = None,
+        extra_visualizations: Dict[str, Any] = None,
+    ):
+        """
+        Log comprehensive summary for a training stage with all visualizations.
+
+        Args:
+            stage: Training stage (1-4)
+            metrics: Dictionary of metrics
+            step: Current step
+            confusion_matrix: Optional confusion matrix
+            class_names: Class names for confusion matrix
+            extra_visualizations: Additional data for visualizations
+        """
+        if not self.enabled:
+            return
+
+        try:
+            # Log basic metrics
+            stage_metrics = {f"stage{stage}/{k}": v for k, v in metrics.items()
+                           if isinstance(v, (int, float))}
+            self.log(stage_metrics, step=step)
+
+            # Log training dashboard
+            self.log_training_dashboard(stage, self.metrics_history, step)
+
+            # Log confusion matrix if provided
+            if confusion_matrix is not None and class_names is not None:
+                self.log_confusion_matrix(
+                    None, None, class_names, step, f"stage{stage}", confusion_matrix
+                )
+
+            # Log metrics table
+            self.log_comprehensive_metrics_table(metrics, stage, step)
+
+            # Stage-specific visualizations
+            if stage == 1 and extra_visualizations:
+                # Stage 1: Visual-Language Alignment
+                if 'similarity_matrix' in extra_visualizations:
+                    viz = self.get_stage_visualizer(1)
+                    if viz:
+                        try:
+                            _, img = viz.plot_similarity_matrix(
+                                extra_visualizations['image_embeds'],
+                                extra_visualizations['text_embeds'],
+                                step
+                            )
+                            self.log_image("stage1/similarity_matrix", img, step=step)
+                        except Exception as e:
+                            logger.warning(f"Failed to log similarity matrix: {e}")
+
+            elif stage == 3 and extra_visualizations:
+                # Stage 3: Robot Selection
+                if 'per_robot_metrics' in extra_visualizations:
+                    viz = self.get_stage_visualizer(3)
+                    if viz:
+                        try:
+                            _, img = viz.plot_per_robot_radar(
+                                extra_visualizations['per_robot_metrics'], step
+                            )
+                            self.log_image("stage3/robot_radar", img, step=step)
+                        except Exception as e:
+                            logger.warning(f"Failed to log robot radar: {e}")
+
+                if 'confidences' in extra_visualizations and 'correct' in extra_visualizations:
+                    viz = self.get_stage_visualizer(3)
+                    if viz:
+                        try:
+                            _, img = viz.plot_confidence_calibration(
+                                extra_visualizations['confidences'],
+                                extra_visualizations['correct'],
+                                step
+                            )
+                            self.log_image("stage3/calibration", img, step=step)
+                        except Exception as e:
+                            logger.warning(f"Failed to log calibration: {e}")
+
+            elif stage == 4 and extra_visualizations:
+                # Stage 4: CoT Reasoning
+                if 'reasoning_quality' in extra_visualizations:
+                    viz = self.get_stage_visualizer(4)
+                    if viz:
+                        try:
+                            rq = extra_visualizations['reasoning_quality']
+                            _, img = viz.plot_reasoning_quality_metrics(
+                                rq.get('coherence', []),
+                                rq.get('consistency', []),
+                                rq.get('step_counts', []),
+                                step
+                            )
+                            self.log_image("stage4/reasoning_quality", img, step=step)
+                        except Exception as e:
+                            logger.warning(f"Failed to log reasoning quality: {e}")
+
+            logger.info(f"✓ Logged comprehensive stage {stage} summary to W&B at step {step}")
+
+        except Exception as e:
+            logger.warning(f"Failed to log comprehensive stage summary: {e}")
+
