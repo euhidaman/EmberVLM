@@ -705,6 +705,7 @@ def load_checkpoint(
         model_state_dict = model_to_load.state_dict()
         filtered_state_dict = {}
         mismatched_keys = []
+        skipped_keys = []
 
         for key, value in state_dict.items():
             if key in model_state_dict:
@@ -712,11 +713,19 @@ def load_checkpoint(
                     filtered_state_dict[key] = value
                 else:
                     mismatched_keys.append(f"{key}: checkpoint {value.shape} vs model {model_state_dict[key].shape}")
+                    logger.warning(f"Shape mismatch for {key}: checkpoint {value.shape} vs model {model_state_dict[key].shape}")
             else:
                 # Key doesn't exist in current model (layer removed/renamed)
-                pass
+                skipped_keys.append(key)
 
-        # Load filtered state dict
+        # Special handling for Stage 2 -> Stage 3 transition
+        # Stage 3 adds new reasoning module with different output dimensions
+        reasoning_module_keys = [k for k in mismatched_keys if 'reasoning_module' in k or 'robot_head' in k]
+        if reasoning_module_keys:
+            logger.info(f"Detected reasoning module architecture change (Stage 2→3 transition)")
+            logger.info(f"Reasoning module will be randomly initialized: {len(reasoning_module_keys)} layers")
+
+        # Load filtered state dict with strict=False to allow missing keys
         missing_keys, unexpected_keys = model_to_load.load_state_dict(filtered_state_dict, strict=False)
 
         logger.info(f"Loaded model weights from {model_path}")

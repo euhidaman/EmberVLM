@@ -426,6 +426,16 @@ torchrun --nproc_per_node=2 scripts/train_all.py \
     --eval_steps 500
 ```
 
+**📖 For detailed Stage 3 guide, see [docs/STAGE3_TRAINING_GUIDE.md](docs/STAGE3_TRAINING_GUIDE.md)**
+
+This comprehensive guide includes:
+- Complete training commands and parameter explanations
+- Checkpoint loading and compatibility details
+- Visualization and metrics interpretation  
+- Troubleshooting common issues
+- Inference API examples
+- FAQ and best practices
+
 **What You'll See (Stage 3):**
 ```
 2025-12-25 INFO - Loaded 5696 samples for train split
