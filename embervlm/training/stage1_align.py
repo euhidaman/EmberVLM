@@ -465,6 +465,22 @@ class Stage1Trainer:
                                 else:
                                     logger.warning(f"  Skipping visualizations: stage_visualizer is None")
 
+                            # Log loss curve and metrics summary every 100 steps
+                            if self.global_step % 100 == 0:
+                                try:
+                                    # Log detailed loss components as charts
+                                    self.wandb_logger.log({
+                                        'stage1/contrastive_loss_chart': self.wandb_logger.wandb.plot.line_series(
+                                            xs=[list(range(len(self.metric_tracker.history.get('contrastive_loss', []))))],
+                                            ys=[self.metric_tracker.history.get('contrastive_loss', [])],
+                                            keys=['Contrastive'],
+                                            title='Stage 1 Contrastive Loss',
+                                            xname='Step'
+                                        ),
+                                    }, step=self.global_step) if hasattr(self.metric_tracker, 'history') and self.metric_tracker.history.get('contrastive_loss') else None
+                                except Exception as e:
+                                    pass  # Silently ignore chart errors
+
                             # Gradient distribution every 500 steps
                             if self.global_step % 500 == 0 and hasattr(self.wandb_logger, 'log_gradient_distribution'):
                                 gradients = {}
