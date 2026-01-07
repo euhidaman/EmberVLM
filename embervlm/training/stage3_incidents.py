@@ -346,7 +346,8 @@ class Stage3Trainer:
 
         with get_autocast_context(self.config):
             # Use vision-only forward pass - bypasses language model entirely
-            outputs = self.model.forward_vision_only(
+            # Use model_ref to access underlying model when using DDP
+            outputs = model_ref.forward_vision_only(
                 pixel_values=pixel_values,
                 robot_targets=robot_targets,
                 return_reasoning=True,

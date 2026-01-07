@@ -51,6 +51,66 @@ logger = logging.getLogger(__name__)
 PRETRAINED_LANGUAGE_MODEL = "tinyllm/30M-0.4"
 
 
+def find_latest_checkpoint(stage_dir: Path) -> Optional[Path]:
+    """
+    Find the latest checkpoint in a stage directory.
+
+    Checkpoints are named like 'checkpoint-{step}' where step is an integer.
+    Returns the checkpoint with the highest step number.
+
+    Args:
+        stage_dir: Path to the stage directory (e.g., outputs/stage2)
+
+    Returns:
+        Path to the latest checkpoint, or None if no checkpoints found
+    """
+    if not stage_dir.exists():
+        return None
+
+    checkpoints = []
+    for item in stage_dir.iterdir():
+        if item.is_dir() and item.name.startswith('checkpoint-'):
+            try:
+                step = int(item.name.split('-')[1])
+                checkpoints.append((step, item))
+            except (ValueError, IndexError):
+                continue
+
+    if not checkpoints:
+        return None
+
+    # Sort by step number and return the latest
+    checkpoints.sort(key=lambda x: x[0], reverse=True)
+    return checkpoints[0][1]
+
+
+def get_previous_stage_checkpoint(output_dir: Path, current_stage: str) -> Optional[Path]:
+    """
+    Get the latest checkpoint from the previous training stage.
+
+    Args:
+        output_dir: Base output directory (e.g., ./outputs)
+        current_stage: Current stage number as string ('2', '3', '4')
+
+    Returns:
+        Path to the latest checkpoint from the previous stage, or None
+    """
+    stage_num = int(current_stage)
+    if stage_num <= 1:
+        return None  # Stage 1 has no previous stage
+
+    prev_stage = stage_num - 1
+    prev_stage_dir = output_dir / f'stage{prev_stage}'
+
+    checkpoint = find_latest_checkpoint(prev_stage_dir)
+    if checkpoint:
+        logger.info(f"Found latest checkpoint from Stage {prev_stage}: {checkpoint}")
+    else:
+        logger.warning(f"No checkpoint found in {prev_stage_dir}")
+
+    return checkpoint
+
+
 def create_model(config: Optional[EmberVLMConfig] = None) -> EmberVLM:
     """Create and initialize EmberVLM model."""
     if config is None:
@@ -172,6 +232,29 @@ def run_all_stages(args: argparse.Namespace):
                 f"❌ Embedding resize failed! Actual: {actual_vocab_size}, Expected: {target_vocab_size}"
             )
         logger.info(f"✓ Verified embedding size: {actual_vocab_size}")
+
+    # Load from checkpoint - either explicitly provided or auto-detected from previous stage
+    checkpoint_path = None
+
+    if args.resume_from_checkpoint:
+        # User explicitly provided a checkpoint path
+        checkpoint_path = Path(args.resume_from_checkpoint)
+        if not checkpoint_path.exists():
+            logger.warning(f"Specified checkpoint {checkpoint_path} does not exist")
+            checkpoint_path = None
+    elif args.stage != 'all' and args.stage != '1':
+        # Running a specific stage (not 'all' or stage 1) - auto-detect previous stage checkpoint
+        logger.info(f"Auto-detecting checkpoint from previous stage for Stage {args.stage}...")
+        checkpoint_path = get_previous_stage_checkpoint(output_dir, args.stage)
+
+    if checkpoint_path and checkpoint_path.exists():
+        logger.info(f"Loading model from checkpoint: {checkpoint_path}")
+        from embervlm.training.train_utils import load_checkpoint
+        load_checkpoint(model, None, None, str(checkpoint_path))
+        logger.info(f"✓ Loaded model weights from {checkpoint_path}")
+    elif args.stage != 'all' and args.stage != '1':
+        logger.warning(f"No checkpoint found for Stage {args.stage}. Starting from base model weights.")
+        logger.warning(f"For best results, run previous stages first or provide --resume_from_checkpoint")
 
     # Synchronize all ranks after model initialization
     if args.distributed:
@@ -544,6 +627,10 @@ def main():
                        help='Push to HuggingFace Hub')
     parser.add_argument('--hub_model_id', type=str, default='embervlm',
                        help='HuggingFace Hub model ID')
+
+    # Resume from checkpoint
+    parser.add_argument('--resume_from_checkpoint', type=str, default=None,
+                       help='Path to checkpoint to resume from (e.g., outputs/stage2/checkpoint-789)')
 
     args = parser.parse_args()
 

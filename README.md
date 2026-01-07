@@ -461,6 +461,42 @@ torchrun --nproc_per_node=2 scripts/train_all.py \
     --reasoning_data reasoning-augmented-dataset
 ```
 
+### Resuming Training from a Checkpoint
+
+EmberVLM **automatically detects and loads the latest checkpoint** from the previous stage when you run a specific stage. No manual checkpoint path needed!
+
+**Run Stage 3 directly (auto-loads latest Stage 2 checkpoint):**
+```bash
+PYTHONUNBUFFERED=1 torchrun --nproc_per_node=2 scripts/train_all.py \
+    --output_dir ./outputs \
+    --stage 3 \
+    --distributed \
+    --mixed_precision bf16 \
+    --batch_size 32 \
+    --learning_rate 2e-4 \
+    --gradient_accumulation 4 \
+    --robot_data robot-selection-dataset \
+    --stage3_robot_epochs 30
+```
+
+**What happens:**
+1. Script detects `--stage 3` and looks for `outputs/stage2/checkpoint-*`
+2. Finds the checkpoint with the highest step number (e.g., `checkpoint-789`)
+3. Automatically loads the model weights from that checkpoint
+4. Proceeds with Stage 3 training
+
+**Manual checkpoint override (optional):**
+```bash
+# If you want to specify a specific checkpoint:
+--resume_from_checkpoint outputs/stage2/checkpoint-500
+```
+
+**Key points:**
+- Automatic detection works for Stages 2, 3, and 4
+- Checkpoints are saved at `outputs/stage{N}/checkpoint-{step}`
+- The script always picks the highest step number (most trained checkpoint)
+- Use `--resume_from_checkpoint` only if you need a specific older checkpoint
+
 ### Hardware Requirements
 
 | Configuration | GPUs | VRAM | Batch Size | Time (Full) |
