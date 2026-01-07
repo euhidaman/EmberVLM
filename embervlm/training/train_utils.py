@@ -700,8 +700,36 @@ def load_checkpoint(
     if model_path.exists():
         model_to_load = unwrap_model(model)
         state_dict = torch.load(model_path, map_location='cpu')
-        model_to_load.load_state_dict(state_dict, strict=False)
+
+        # Filter out mismatched keys (e.g., when model architecture changes between stages)
+        model_state_dict = model_to_load.state_dict()
+        filtered_state_dict = {}
+        mismatched_keys = []
+
+        for key, value in state_dict.items():
+            if key in model_state_dict:
+                if model_state_dict[key].shape == value.shape:
+                    filtered_state_dict[key] = value
+                else:
+                    mismatched_keys.append(f"{key}: checkpoint {value.shape} vs model {model_state_dict[key].shape}")
+            else:
+                # Key doesn't exist in current model (layer removed/renamed)
+                pass
+
+        # Load filtered state dict
+        missing_keys, unexpected_keys = model_to_load.load_state_dict(filtered_state_dict, strict=False)
+
         logger.info(f"Loaded model weights from {model_path}")
+        if mismatched_keys:
+            logger.warning(f"Skipped {len(mismatched_keys)} mismatched layer(s) - will be randomly initialized:")
+            for key_info in mismatched_keys[:5]:  # Show first 5
+                logger.warning(f"  - {key_info}")
+            if len(mismatched_keys) > 5:
+                logger.warning(f"  ... and {len(mismatched_keys) - 5} more")
+        if missing_keys:
+            logger.info(f"Missing keys (will use model's initialization): {len(missing_keys)} keys")
+        if unexpected_keys:
+            logger.info(f"Unexpected keys in checkpoint (ignored): {len(unexpected_keys)} keys")
 
     # Load training state
     state_path = checkpoint_dir / 'training_state.pt'
