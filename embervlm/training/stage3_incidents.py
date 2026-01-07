@@ -521,12 +521,9 @@ class Stage3Trainer:
 
         val_data = self.val_dataloader if self.val_dataloader else self.robot_dataloader
 
-        # Get vocab size for validation - handle DDP wrapper
-        model_for_vocab = self.model.module if hasattr(self.model, 'module') else self.model
-        try:
-            vocab_size = model_for_vocab.language_model.get_input_embeddings().weight.shape[0]
-        except Exception:
-            vocab_size = 50262  # Fallback to expected vocab size
+        # Use cached vocab size for consistency
+        vocab_size = self._vocab_size
+        logger.info(f"Evaluation using vocab_size={vocab_size}")
 
         for batch in tqdm(
             val_data,
@@ -537,19 +534,28 @@ class Stage3Trainer:
             input_ids = batch['input_ids'].to(self.device)
             attention_mask = batch['attention_mask'].to(self.device)
 
-            # CRITICAL FIX: Validate and clamp input_ids BEFORE model forward
+            # CRITICAL FIX: Always clamp input_ids to valid range BEFORE model forward
             # This prevents CUDA index out of bounds errors during embedding lookup
-            invalid_mask = (input_ids >= vocab_size) | (input_ids < 0)
-            if invalid_mask.any():
-                num_invalid = invalid_mask.sum().item()
+            # Use in-place clamp for safety and efficiency
+            max_valid_id = vocab_size - 1
+
+            # Check for invalid tokens first (for logging)
+            original_max = input_ids.max().item()
+            original_min = input_ids.min().item()
+
+            if original_max >= vocab_size or original_min < 0:
+                num_invalid = ((input_ids >= vocab_size) | (input_ids < 0)).sum().item()
                 logger.warning(
                     f"⚠️ Eval: {num_invalid} invalid token IDs detected "
-                    f"(max={input_ids.max().item()}, vocab_size={vocab_size}). Clamping to 0."
+                    f"(range=[{original_min}, {original_max}], vocab_size={vocab_size}). Clamping."
                 )
-                input_ids = torch.where(invalid_mask, torch.zeros_like(input_ids), input_ids)
-                # Synchronize CUDA to ensure clamping is applied before forward
-                if self.device.type == 'cuda':
-                    torch.cuda.synchronize(self.device)
+
+            # ALWAYS clamp to ensure valid range - this is the critical fix
+            input_ids = input_ids.clamp(min=0, max=max_valid_id)
+
+            # Force synchronize to ensure clamping is complete before forward pass
+            if self.device.type == 'cuda':
+                torch.cuda.synchronize(self.device)
 
             robot_targets = batch.get('robot_target')
             multi_robot_targets = batch.get('multi_robot_target')
@@ -574,6 +580,10 @@ class Stage3Trainer:
                     multi_robot_targets = multi_robot_targets.clamp(0.0, 1.0)
 
             with get_autocast_context(self.config):
+                # FINAL DEFENSIVE CLAMP: Absolute guarantee no OOB tokens
+                # Use clamp_() for in-place operation right before forward
+                input_ids.clamp_(min=0, max=vocab_size - 1)
+
                 outputs = self.model(
                     input_ids=input_ids,
                     pixel_values=pixel_values,
