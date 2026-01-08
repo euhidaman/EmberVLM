@@ -418,13 +418,21 @@ class EnhancedRobotSelectionDataset(Dataset):
 
         # Add slight variation to reasoning
         if sample['reasoning']:
-            aug_sample['reasoning'] = sample['reasoning'].copy()
-            # Reorder some reasoning steps randomly
-            if len(aug_sample['reasoning']) > 2 and random.random() > 0.5:
-                # Swap two middle steps
-                mid = len(aug_sample['reasoning']) // 2
-                aug_sample['reasoning'][mid-1], aug_sample['reasoning'][mid] = \
-                    aug_sample['reasoning'][mid], aug_sample['reasoning'][mid-1]
+            # Handle both string and list reasoning formats
+            if isinstance(sample['reasoning'], str):
+                # For string reasoning, just copy it (no reordering possible)
+                aug_sample['reasoning'] = sample['reasoning']
+            elif isinstance(sample['reasoning'], list):
+                aug_sample['reasoning'] = sample['reasoning'].copy()
+                # Reorder some reasoning steps randomly
+                if len(aug_sample['reasoning']) > 2 and random.random() > 0.5:
+                    # Swap two middle steps
+                    mid = len(aug_sample['reasoning']) // 2
+                    aug_sample['reasoning'][mid-1], aug_sample['reasoning'][mid] = \
+                        aug_sample['reasoning'][mid], aug_sample['reasoning'][mid-1]
+            else:
+                # For any other type, just copy the reference
+                aug_sample['reasoning'] = sample['reasoning']
 
         return aug_sample
 
