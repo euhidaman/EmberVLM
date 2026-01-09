@@ -584,6 +584,7 @@ def run_all_stages(args: argparse.Namespace):
 
     # Carbon tracking - ONLY on rank 0 to prevent duplicate tracking
     carbon_tracker = None
+    total_emissions = None
     if rank == 0:
         try:
             carbon_tracker = CarbonTracker(
