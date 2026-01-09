@@ -149,8 +149,9 @@ class TinyAttention(nn.Module):
         # Causal mask
         self.register_buffer(
             "bias",
-            torch.tril(torch.ones(config.max_position_embeddings, config.max_position_embeddings))
-                .view(1, 1, config.max_position_embeddings, config.max_position_embeddings),
+            torch.tril(torch.ones(config.max_position_embeddings,
+                       config.max_position_embeddings))
+            .view(1, 1, config.max_position_embeddings, config.max_position_embeddings),
             persistent=False
         )
 
@@ -179,9 +180,12 @@ class TinyAttention(nn.Module):
         query, key, value = qkv.split(self.hidden_size, dim=2)
 
         # Reshape to [B, num_heads, seq_len, head_dim]
-        query = query.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key = key.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        value = value.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        query = query.view(batch_size, seq_len, self.num_heads,
+                           self.head_dim).transpose(1, 2)
+        key = key.view(batch_size, seq_len, self.num_heads,
+                       self.head_dim).transpose(1, 2)
+        value = value.view(batch_size, seq_len, self.num_heads,
+                           self.head_dim).transpose(1, 2)
 
         # Handle KV cache
         if past_key_value is not None:
@@ -204,21 +208,25 @@ class TinyAttention(nn.Module):
         # Apply causal mask
         query_length = query.size(2)
         key_length = key.size(2)
-        causal_mask = self.bias[:, :, key_length - query_length:key_length, :key_length]
+        causal_mask = self.bias[:, :, key_length -
+                                query_length:key_length, :key_length]
         mask_value = torch.finfo(attn_weights.dtype).min
-        attn_weights = torch.where(causal_mask.bool(), attn_weights, mask_value)
+        attn_weights = torch.where(
+            causal_mask.bool(), attn_weights, mask_value)
 
         # Apply attention mask if provided
         if attention_mask is not None:
             attn_weights = attn_weights + attention_mask
 
         # Softmax and dropout
-        attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
+        attn_weights = F.softmax(attn_weights, dim=-1,
+                                 dtype=torch.float32).to(query.dtype)
         attn_weights = self.attn_dropout(attn_weights)
 
         # Compute attention output
         attn_output = torch.matmul(attn_weights, value)
-        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, self.hidden_size)
+        attn_output = attn_output.transpose(1, 2).contiguous().view(
+            batch_size, seq_len, self.hidden_size)
         attn_output = self.c_proj(attn_output)
         attn_output = self.resid_dropout(attn_output)
 
@@ -303,7 +311,8 @@ class TinyLLM(nn.Module):
 
         # Embeddings
         self.wte = nn.Embedding(config.vocab_size, config.hidden_size)
-        self.wpe = nn.Embedding(config.max_position_embeddings, config.hidden_size)
+        self.wpe = nn.Embedding(
+            config.max_position_embeddings, config.hidden_size)
         self.drop = nn.Dropout(config.hidden_dropout_prob)
 
         # Transformer blocks
@@ -320,15 +329,18 @@ class TinyLLM(nn.Module):
         # Apply special scaled init to residual projections
         for pn, p in self.named_parameters():
             if pn.endswith('c_proj.weight'):
-                nn.init.normal_(p, mean=0.0, std=config.initializer_range / math.sqrt(2 * config.num_hidden_layers))
+                nn.init.normal_(p, mean=0.0, std=config.initializer_range /
+                                math.sqrt(2 * config.num_hidden_layers))
 
     def _init_weights(self, module: nn.Module):
         if isinstance(module, nn.Linear):
-            nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
+            nn.init.normal_(module.weight, mean=0.0,
+                            std=self.config.initializer_range)
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
-            nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
+            nn.init.normal_(module.weight, mean=0.0,
+                            std=self.config.initializer_range)
         elif isinstance(module, nn.LayerNorm):
             nn.init.ones_(module.weight)
             nn.init.zeros_(module.bias)
@@ -414,7 +426,8 @@ class TinyLLM(nn.Module):
         # Prepare attention mask
         if attention_mask is not None:
             attention_mask = attention_mask[:, None, None, :]
-            attention_mask = (1.0 - attention_mask) * torch.finfo(hidden_states.dtype).min
+            attention_mask = (1.0 - attention_mask) * \
+                torch.finfo(hidden_states.dtype).min
 
         # Forward through transformer blocks
         presents = () if use_cache else None
@@ -441,7 +454,8 @@ class TinyLLM(nn.Module):
                 presents += (outputs[1],)
 
             if output_attentions:
-                all_attentions += (outputs[2] if len(outputs) > 2 else outputs[-1],)
+                all_attentions += (outputs[2]
+                                   if len(outputs) > 2 else outputs[-1],)
 
         # Final layer norm
         hidden_states = self.ln_f(hidden_states)
@@ -464,7 +478,8 @@ class TinyLLMForCausalLM(nn.Module):
         super().__init__()
         self.config = config
         self.transformer = TinyLLM(config)
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.lm_head = nn.Linear(
+            config.hidden_size, config.vocab_size, bias=False)
 
         # Tie weights
         if config.tie_word_embeddings:
@@ -608,22 +623,28 @@ class TinyLLMForCausalLM(nn.Module):
 
             if do_sample:
                 if top_k > 0:
-                    indices_to_remove = next_token_logits < torch.topk(next_token_logits, top_k)[0][..., -1, None]
+                    indices_to_remove = next_token_logits < torch.topk(
+                        next_token_logits, top_k)[0][..., -1, None]
                     next_token_logits[indices_to_remove] = float('-inf')
 
                 if top_p < 1.0:
-                    sorted_logits, sorted_indices = torch.sort(next_token_logits, descending=True)
-                    cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                    sorted_logits, sorted_indices = torch.sort(
+                        next_token_logits, descending=True)
+                    cumulative_probs = torch.cumsum(
+                        F.softmax(sorted_logits, dim=-1), dim=-1)
                     sorted_indices_to_remove = cumulative_probs > top_p
-                    sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                    sorted_indices_to_remove[...,
+                                             1:] = sorted_indices_to_remove[..., :-1].clone()
                     sorted_indices_to_remove[..., 0] = 0
-                    indices_to_remove = sorted_indices_to_remove.scatter(-1, sorted_indices, sorted_indices_to_remove)
+                    indices_to_remove = sorted_indices_to_remove.scatter(
+                        -1, sorted_indices, sorted_indices_to_remove)
                     next_token_logits[indices_to_remove] = float('-inf')
 
                 probs = F.softmax(next_token_logits, dim=-1)
                 next_token = torch.multinomial(probs, num_samples=1)
             else:
-                next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+                next_token = torch.argmax(
+                    next_token_logits, dim=-1, keepdim=True)
 
             generated = next_token
             batch_size = inputs_embeds.size(0)
@@ -651,22 +672,28 @@ class TinyLLMForCausalLM(nn.Module):
 
             if do_sample:
                 if top_k > 0:
-                    indices_to_remove = next_token_logits < torch.topk(next_token_logits, top_k)[0][..., -1, None]
+                    indices_to_remove = next_token_logits < torch.topk(
+                        next_token_logits, top_k)[0][..., -1, None]
                     next_token_logits[indices_to_remove] = float('-inf')
 
                 if top_p < 1.0:
-                    sorted_logits, sorted_indices = torch.sort(next_token_logits, descending=True)
-                    cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                    sorted_logits, sorted_indices = torch.sort(
+                        next_token_logits, descending=True)
+                    cumulative_probs = torch.cumsum(
+                        F.softmax(sorted_logits, dim=-1), dim=-1)
                     sorted_indices_to_remove = cumulative_probs > top_p
-                    sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                    sorted_indices_to_remove[...,
+                                             1:] = sorted_indices_to_remove[..., :-1].clone()
                     sorted_indices_to_remove[..., 0] = 0
-                    indices_to_remove = sorted_indices_to_remove.scatter(-1, sorted_indices, sorted_indices_to_remove)
+                    indices_to_remove = sorted_indices_to_remove.scatter(
+                        -1, sorted_indices, sorted_indices_to_remove)
                     next_token_logits[indices_to_remove] = float('-inf')
 
                 probs = F.softmax(next_token_logits, dim=-1)
                 next_token = torch.multinomial(probs, num_samples=1)
             else:
-                next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+                next_token = torch.argmax(
+                    next_token_logits, dim=-1, keepdim=True)
 
             generated = torch.cat([generated, next_token], dim=1)
 
@@ -749,7 +776,8 @@ class TinyLLMBackbone(nn.Module):
             )
 
             # Replace invalid tokens with 0
-            input_ids = torch.where(invalid_mask, torch.zeros_like(input_ids), input_ids)
+            input_ids = torch.where(
+                invalid_mask, torch.zeros_like(input_ids), input_ids)
 
             # Force CUDA sync
             if input_ids.is_cuda:
@@ -855,7 +883,8 @@ class PretrainedTinyLLMBackbone(nn.Module):
             hidden_size=self.hf_config.n_embd,
             num_hidden_layers=self.hf_config.n_layer,
             num_attention_heads=self.hf_config.n_head,
-            intermediate_size=self.hf_config.n_inner if self.hf_config.n_inner else 4 * self.hf_config.n_embd,
+            intermediate_size=self.hf_config.n_inner if self.hf_config.n_inner else 4 *
+            self.hf_config.n_embd,
             hidden_act="gelu_new",
             max_position_embeddings=self.hf_config.n_positions,
             use_pretrained=True,
@@ -875,7 +904,8 @@ class PretrainedTinyLLMBackbone(nn.Module):
 
         # Count parameters
         total_params = sum(p.numel() for p in self.model.parameters())
-        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        trainable_params = sum(p.numel()
+                               for p in self.model.parameters() if p.requires_grad)
         print(f"Total parameters: {total_params:,}")
         print(f"Trainable parameters: {trainable_params:,}")
 
@@ -932,13 +962,15 @@ class PretrainedTinyLLMBackbone(nn.Module):
         if max_val >= vocab_size or min_val < 0:
             import logging
             logger = logging.getLogger(__name__)
-            num_invalid = ((input_ids_cpu >= vocab_size) | (input_ids_cpu < 0)).sum().item()
+            num_invalid = ((input_ids_cpu >= vocab_size) |
+                           (input_ids_cpu < 0)).sum().item()
             logger.warning(
                 f"⚠️ embed_tokens: {num_invalid} invalid tokens. "
                 f"Range: [{min_val}, {max_val}], Valid: [0, {vocab_size - 1}]. Clamping."
             )
             # Clamp on CPU - guaranteed synchronous
-            input_ids_cpu = torch.clamp(input_ids_cpu, min=0, max=vocab_size - 1)
+            input_ids_cpu = torch.clamp(
+                input_ids_cpu, min=0, max=vocab_size - 1)
 
         # Move back to original device with blocking transfer
         input_ids_safe = input_ids_cpu.to(original_device, non_blocking=False)
@@ -1055,7 +1087,8 @@ class PretrainedTinyLLMBackbone(nn.Module):
                     )
                     flat_labels = torch.where(
                         valid_mask,
-                        torch.clamp(flat_labels, min=0, max=actual_vocab_size - 1),
+                        torch.clamp(flat_labels, min=0,
+                                    max=actual_vocab_size - 1),
                         flat_labels
                     )
                     shift_labels = flat_labels.view(shift_labels.shape)
@@ -1155,9 +1188,11 @@ class SmolLMBackbone(nn.Module):
             hidden_size=self.hf_config.hidden_size,
             num_hidden_layers=self.hf_config.num_hidden_layers,
             num_attention_heads=self.hf_config.num_attention_heads,
-            intermediate_size=getattr(self.hf_config, 'intermediate_size', 4 * self.hf_config.hidden_size),
+            intermediate_size=getattr(
+                self.hf_config, 'intermediate_size', 4 * self.hf_config.hidden_size),
             hidden_act="silu",  # SmolLM uses SiLU activation
-            max_position_embeddings=getattr(self.hf_config, 'max_position_embeddings', 2048),
+            max_position_embeddings=getattr(
+                self.hf_config, 'max_position_embeddings', 2048),
             use_pretrained=True,
             pretrained_model_name=model_name,
         )
@@ -1176,7 +1211,8 @@ class SmolLMBackbone(nn.Module):
 
         # Count parameters
         total_params = sum(p.numel() for p in self.model.parameters())
-        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        trainable_params = sum(p.numel()
+                               for p in self.model.parameters() if p.requires_grad)
         print(f"Total parameters: {total_params:,}")
         print(f"Trainable parameters: {trainable_params:,}")
 
@@ -1226,12 +1262,14 @@ class SmolLMBackbone(nn.Module):
         if max_val >= vocab_size or min_val < 0:
             import logging
             logger = logging.getLogger(__name__)
-            num_invalid = ((input_ids_cpu >= vocab_size) | (input_ids_cpu < 0)).sum().item()
+            num_invalid = ((input_ids_cpu >= vocab_size) |
+                           (input_ids_cpu < 0)).sum().item()
             logger.warning(
                 f"⚠️ SmolLMBackbone.embed_tokens: {num_invalid} invalid tokens. "
                 f"Range: [{min_val}, {max_val}], Valid: [0, {vocab_size - 1}]. Clamping."
             )
-            input_ids_cpu = torch.clamp(input_ids_cpu, min=0, max=vocab_size - 1)
+            input_ids_cpu = torch.clamp(
+                input_ids_cpu, min=0, max=vocab_size - 1)
 
         # Move back to original device with blocking transfer
         input_ids_safe = input_ids_cpu.to(original_device, non_blocking=False)
@@ -1335,7 +1373,8 @@ class SmolLMBackbone(nn.Module):
                     )
                     flat_labels = torch.where(
                         valid_mask,
-                        torch.clamp(flat_labels, min=0, max=actual_vocab_size - 1),
+                        torch.clamp(flat_labels, min=0,
+                                    max=actual_vocab_size - 1),
                         flat_labels
                     )
                     shift_labels = flat_labels.view(shift_labels.shape)
@@ -1433,11 +1472,10 @@ def create_language_backbone(
             )
     else:
         if not HF_AVAILABLE and use_pretrained:
-            print("Warning: transformers not available, falling back to random initialization")
+            print(
+                "Warning: transformers not available, falling back to random initialization")
         return TinyLLMBackbone(
             config=config,
             freeze_base=freeze_base,
             unfreeze_last_layer=unfreeze_last_layer,
         )
-
-

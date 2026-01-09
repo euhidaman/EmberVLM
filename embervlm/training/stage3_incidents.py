@@ -195,13 +195,14 @@ class Stage3Trainer:
         if is_main_process():
             logger.info("Initializing Enhanced W&B logger with visualizations (main process)...")
             try:
+                wandb_project = config.wandb_project if hasattr(config, 'wandb_project') and config.wandb_project else "embervlm"
                 self.wandb_logger = EnhancedWandbLogger(
-                    project="embervlm",
+                    project=wandb_project,
                     name="stage3_robot_selection",
                     config=config.to_dict(),
                     output_dir=str(Path(config.output_dir) / 'visualizations'),
                 )
-                logger.info("Enhanced W&B logger initialized with visualizations")
+                logger.info(f"Enhanced W&B logger initialized with project: {wandb_project}")
             except Exception as e:
                 logger.warning(f"Failed to initialize Enhanced W&B logger: {e}")
                 self.wandb_logger = None

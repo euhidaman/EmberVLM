@@ -84,7 +84,8 @@ class EmberVLMConfig:
 
     # Robot fleet
     num_robots: int = 5
-    robot_names: List[str] = field(default_factory=lambda: ["Drone", "Humanoid", "Wheeled", "Legged", "Underwater"])
+    robot_names: List[str] = field(default_factory=lambda: [
+                                   "Drone", "Humanoid", "Wheeled", "Legged", "Underwater"])
 
     # Special tokens
     special_tokens: Dict[str, str] = field(default_factory=lambda: {
@@ -169,7 +170,8 @@ class EmberVLM(nn.Module):
             self._build_reasoning_module()
 
         # Image preprocessor
-        self.image_preprocessor = ImagePreprocessor(image_size=config.image_size)
+        self.image_preprocessor = ImagePreprocessor(
+            image_size=config.image_size)
 
         # Loss function
         self.reasoning_loss = ReasoningLoss(
@@ -323,12 +325,14 @@ class EmberVLM(nn.Module):
         if max_val >= vocab_size or min_val < 0:
             import logging
             logger = logging.getLogger(__name__)
-            num_invalid = ((input_ids_cpu >= vocab_size) | (input_ids_cpu < 0)).sum().item()
+            num_invalid = ((input_ids_cpu >= vocab_size) |
+                           (input_ids_cpu < 0)).sum().item()
             logger.error(
                 f"❌ prepare_inputs_embeds: {num_invalid} invalid token IDs! "
                 f"Range: [{min_val}, {max_val}], Valid: [0, {vocab_size - 1}]. Clamping."
             )
-            input_ids_cpu = torch.clamp(input_ids_cpu, min=0, max=vocab_size - 1)
+            input_ids_cpu = torch.clamp(
+                input_ids_cpu, min=0, max=vocab_size - 1)
 
         # Move back with blocking transfer
         input_ids = input_ids_cpu.to(device, non_blocking=False)
@@ -342,7 +346,8 @@ class EmberVLM(nn.Module):
 
         if pixel_values is None:
             # No images, return text embeddings directly
-            pad_token_id = getattr(self.language_model.config, 'pad_token_id', 0) or 0
+            pad_token_id = getattr(
+                self.language_model.config, 'pad_token_id', 0) or 0
             attention_mask = (input_ids != pad_token_id).long()
             return text_embeds, attention_mask
 
@@ -357,7 +362,8 @@ class EmberVLM(nn.Module):
         # Determine image positions
         if image_positions is None:
             # Default: insert at beginning
-            image_positions = torch.zeros(batch_size, dtype=torch.long, device=device)
+            image_positions = torch.zeros(
+                batch_size, dtype=torch.long, device=device)
 
         # Create merged embeddings
         total_len = seq_len + num_visual
@@ -365,7 +371,8 @@ class EmberVLM(nn.Module):
             batch_size, total_len, self.config.language_hidden_size,
             dtype=text_embeds.dtype, device=device
         )
-        attention_mask = torch.zeros(batch_size, total_len, dtype=torch.long, device=device)
+        attention_mask = torch.zeros(
+            batch_size, total_len, dtype=torch.long, device=device)
 
         for i in range(batch_size):
             pos = image_positions[i].item()
@@ -377,13 +384,17 @@ class EmberVLM(nn.Module):
             # Insert text before image
             if pos > 0:
                 inputs_embeds[i, :pos] = text_embeds[i, :pos]
-                attention_mask[i, :pos] = (input_ids[i, :pos] != self.language_model.config.pad_token_id).long()
+                attention_mask[i, :pos] = (
+                    input_ids[i, :pos] != self.language_model.config.pad_token_id).long()
 
             # Insert text after image
             remaining = seq_len - pos
-            inputs_embeds[i, pos + num_visual:pos + num_visual + remaining] = text_embeds[i, pos:]
-            text_mask = (input_ids[i, pos:] != self.language_model.config.pad_token_id).long()
-            attention_mask[i, pos + num_visual:pos + num_visual + remaining] = text_mask
+            inputs_embeds[i, pos + num_visual:pos +
+                          num_visual + remaining] = text_embeds[i, pos:]
+            text_mask = (input_ids[i, pos:] !=
+                         self.language_model.config.pad_token_id).long()
+            attention_mask[i, pos + num_visual:pos +
+                           num_visual + remaining] = text_mask
 
         return inputs_embeds, attention_mask
 
@@ -433,7 +444,8 @@ class EmberVLM(nn.Module):
                     attention_mask.size(0), num_visual,
                     dtype=attention_mask.dtype, device=attention_mask.device
                 )
-                attention_mask = torch.cat([visual_mask, attention_mask], dim=1)
+                attention_mask = torch.cat(
+                    [visual_mask, attention_mask], dim=1)
         else:
             attention_mask = input_attention_mask
 
@@ -442,7 +454,8 @@ class EmberVLM(nn.Module):
         if labels is not None:
             # CRITICAL SAFEGUARD: Validate labels before they are used
             # This prevents CUDA index out of bounds errors during loss computation
-            vocab_size = self.language_model.get_input_embeddings().weight.shape[0]
+            vocab_size = self.language_model.get_input_embeddings(
+            ).weight.shape[0]
             valid_labels_mask = labels != -100
             if valid_labels_mask.any():
                 valid_labels = labels[valid_labels_mask]
@@ -477,7 +490,8 @@ class EmberVLM(nn.Module):
 
                 # Determine image positions
                 if image_positions is None:
-                    image_positions = torch.zeros(batch_size, dtype=torch.long, device=device)
+                    image_positions = torch.zeros(
+                        batch_size, dtype=torch.long, device=device)
 
                 # Create adjusted labels with -100 at visual token positions
                 adjusted_labels = torch.full(
@@ -498,16 +512,19 @@ class EmberVLM(nn.Module):
                     start_pos = pos + num_visual
                     if start_pos < adjusted_labels.size(1) and pos < labels.size(1):
                         remaining = labels.size(1) - pos
-                        end_pos = min(start_pos + remaining, adjusted_labels.size(1))
+                        end_pos = min(start_pos + remaining,
+                                      adjusted_labels.size(1))
                         copy_len = end_pos - start_pos
-                        adjusted_labels[i, start_pos:end_pos] = labels[i, pos:pos + copy_len]
+                        adjusted_labels[i, start_pos:end_pos] = labels[i,
+                                                                       pos:pos + copy_len]
             else:
                 adjusted_labels = labels
 
         # Forward through language model
         # Always get hidden states if reasoning is enabled and we need them
         need_hidden_states = output_hidden_states or (
-            self.config.reasoning_enabled and (return_reasoning or robot_targets is not None)
+            self.config.reasoning_enabled and (
+                return_reasoning or robot_targets is not None)
         )
 
         lm_outputs = self.language_model(
@@ -558,10 +575,12 @@ class EmberVLM(nn.Module):
                 if action_targets is not None:
                     targets['action_target'] = action_targets
 
-                reasoning_losses = self.reasoning_loss(reasoning_outputs, targets)
+                reasoning_losses = self.reasoning_loss(
+                    reasoning_outputs, targets)
 
                 if outputs['loss'] is not None:
-                    outputs['loss'] = outputs['loss'] + reasoning_losses['total_loss']
+                    outputs['loss'] = outputs['loss'] + \
+                        reasoning_losses['total_loss']
                 else:
                     outputs['loss'] = reasoning_losses['total_loss']
 
@@ -610,23 +629,27 @@ class EmberVLM(nn.Module):
 
         # 1. Encode images through vision encoder
         vision_output = self.encode_image(pixel_values)
-        visual_tokens = vision_output['visual_tokens']  # [B, num_visual_tokens, vision_dim]
+        # [B, num_visual_tokens, vision_dim]
+        visual_tokens = vision_output['visual_tokens']
 
         # 2. Project visual tokens to language model dimension through fusion
         # This preserves the learned visual-semantic alignment from Stages 1 & 2
-        fused_visual = self.fuse_features(visual_tokens)  # [B, num_visual_tokens, language_hidden_size]
+        # [B, num_visual_tokens, language_hidden_size]
+        fused_visual = self.fuse_features(visual_tokens)
 
         # 3. Optionally combine with task embeddings for richer context
         if task_embeddings is not None:
             # Concatenate visual and task features for joint reasoning
-            combined_features = torch.cat([fused_visual, task_embeddings], dim=1)
+            combined_features = torch.cat(
+                [fused_visual, task_embeddings], dim=1)
             seq_len = combined_features.size(1)
         else:
             combined_features = fused_visual
             seq_len = fused_visual.size(1)
 
         # 4. Create attention mask
-        attention_mask = torch.ones(batch_size, seq_len, dtype=torch.long, device=device)
+        attention_mask = torch.ones(
+            batch_size, seq_len, dtype=torch.long, device=device)
 
         # 5. Pass through reasoning module for robot selection
         # The reasoning module performs:
@@ -664,7 +687,8 @@ class EmberVLM(nn.Module):
             loss = None
             if robot_targets is not None:
                 targets = {'robot_target': robot_targets}
-                reasoning_losses = self.reasoning_loss(reasoning_outputs, targets)
+                reasoning_losses = self.reasoning_loss(
+                    reasoning_outputs, targets)
                 loss = reasoning_losses['total_loss']
                 outputs['reasoning_losses'] = reasoning_losses
 
@@ -863,13 +887,15 @@ class EmberVLM(nn.Module):
             else:
                 # Fallback to manual top-k
                 probs = outputs['robot_probs'][b]
-                top_scores, top_indices = torch.topk(probs, min(top_n, self.config.num_robots))
+                top_scores, top_indices = torch.topk(
+                    probs, min(top_n, self.config.num_robots))
 
             # Build top robots list
             top_robots = []
             for idx, (robot_idx, score) in enumerate(zip(top_indices, top_scores)):
                 robot_name = self.config.robot_names[robot_idx.item()]
-                confidence = outputs['robot_confidence'][b, robot_idx].item() if outputs.get('robot_confidence') is not None and outputs['robot_confidence'].dim() > 1 else score.item()
+                confidence = outputs['robot_confidence'][b, robot_idx].item() if outputs.get(
+                    'robot_confidence') is not None and outputs['robot_confidence'].dim() > 1 else score.item()
                 top_robots.append({
                     'rank': idx + 1,
                     'robot_name': robot_name,
@@ -945,29 +971,35 @@ class EmberVLM(nn.Module):
             "Robot with Legs": "rough terrain navigation and climbing",
         }
 
-        capability = robot_capabilities.get(selected_robot, "specialized capabilities")
+        capability = robot_capabilities.get(
+            selected_robot, "specialized capabilities")
 
         # Sort by attention for explanation
         if robot_attention:
-            sorted_robots = sorted(robot_attention.items(), key=lambda x: x[1], reverse=True)
+            sorted_robots = sorted(
+                robot_attention.items(), key=lambda x: x[1], reverse=True)
             top_robot = sorted_robots[0][0]
             reason = f"Based on visual analysis, {selected_robot} is recommended for its {capability}."
         else:
             reason = f"{selected_robot} is selected for its {capability}."
 
         if task_text:
-            reason += f" The task '{task_text[:50]}...' requires these specific abilities." if len(task_text) > 50 else f" The task '{task_text}' requires these specific abilities."
+            reason += f" The task '{task_text[:50]}...' requires these specific abilities." if len(
+                task_text) > 50 else f" The task '{task_text}' requires these specific abilities."
 
         return reason
 
     def count_parameters(self) -> Dict[str, int]:
         """Count model parameters."""
         total = sum(p.numel() for p in self.parameters())
-        trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        trainable = sum(p.numel()
+                        for p in self.parameters() if p.requires_grad)
 
         # Per component
-        vision_params = sum(p.numel() for p in self.vision_encoder.parameters())
-        language_params = sum(p.numel() for p in self.language_model.parameters())
+        vision_params = sum(p.numel()
+                            for p in self.vision_encoder.parameters())
+        language_params = sum(p.numel()
+                              for p in self.language_model.parameters())
         fusion_params = sum(p.numel() for p in self.fusion_module.parameters())
 
         result = {
@@ -979,7 +1011,8 @@ class EmberVLM(nn.Module):
         }
 
         if self.config.reasoning_enabled:
-            reasoning_params = sum(p.numel() for p in self.reasoning_module.parameters())
+            reasoning_params = sum(p.numel()
+                                   for p in self.reasoning_module.parameters())
             result['reasoning_module'] = reasoning_params
 
         return result
@@ -1095,4 +1128,3 @@ def load_embervlm(
     model.eval()
 
     return model
-

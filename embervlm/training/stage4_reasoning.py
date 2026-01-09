@@ -223,23 +223,25 @@ class Stage4Trainer:
             logger.info("Initializing Enhanced W&B logger (main process)...")
             try:
                 from embervlm.monitoring.wandb_logger import EnhancedWandbLogger
+                wandb_project = config.wandb_project if hasattr(config, 'wandb_project') and config.wandb_project else "embervlm"
                 self.wandb_logger = EnhancedWandbLogger(
-                    project="embervlm",
+                    project=wandb_project,
                     name="stage4_reasoning",
                     config=config.to_dict(),
                     output_dir=str(Path(config.output_dir) / 'visualizations'),
                 )
-                logger.info("Enhanced W&B logger initialized with visualizations")
+                logger.info(f"Enhanced W&B logger initialized with project: {wandb_project}")
             except Exception as e:
                 logger.warning(f"Failed to initialize Enhanced W&B logger: {e}")
                 # Fallback to basic logger
                 try:
+                    wandb_project = config.wandb_project if hasattr(config, 'wandb_project') and config.wandb_project else "embervlm"
                     self.wandb_logger = WandbLogger(
-                        project="embervlm",
+                        project=wandb_project,
                         name="stage4_reasoning",
                         config=config.to_dict(),
                     )
-                    logger.info("Basic W&B logger initialized")
+                    logger.info(f"Basic W&B logger initialized with project: {wandb_project}")
                 except Exception as e2:
                     logger.warning(f"Failed to initialize W&B logger: {e2}")
                     self.wandb_logger = None

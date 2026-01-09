@@ -65,6 +65,7 @@ class TrainingConfig:
     # Logging
     log_steps: int = 50
     eval_steps: int = 500
+    wandb_project: Optional[str] = None  # W&B project name (e.g., embervlm-tiny, embervlm-small)
 
     # HuggingFace
     push_to_hub: bool = False

@@ -43,9 +43,11 @@ from embervlm.monitoring.wandb_logger import WandbLogger
 from embervlm.monitoring.carbon_tracker import CarbonTracker
 
 # Set environment variables for memory safety BEFORE any CUDA operations
-os.environ.setdefault('OMP_NUM_THREADS', '1')  # Prevent OpenMP thread explosion
+# Prevent OpenMP thread explosion
+os.environ.setdefault('OMP_NUM_THREADS', '1')
 os.environ.setdefault('MKL_NUM_THREADS', '1')  # Prevent MKL thread explosion
-os.environ.setdefault('TOKENIZERS_PARALLELISM', 'false')  # Prevent tokenizer warnings
+# Prevent tokenizer warnings
+os.environ.setdefault('TOKENIZERS_PARALLELISM', 'false')
 
 logging.basicConfig(
     level=logging.INFO,
@@ -111,7 +113,8 @@ def get_previous_stage_checkpoint(output_dir: Path, current_stage: str) -> Optio
 
     checkpoint = find_latest_checkpoint(prev_stage_dir)
     if checkpoint:
-        logger.info(f"Found latest checkpoint from Stage {prev_stage}: {checkpoint}")
+        logger.info(
+            f"Found latest checkpoint from Stage {prev_stage}: {checkpoint}")
     else:
         logger.warning(f"No checkpoint found in {prev_stage_dir}")
 
@@ -127,7 +130,8 @@ def create_model(config: Optional[EmberVLMConfig] = None) -> EmberVLM:
 
     # Print parameter info
     param_counts = model.count_parameters()
-    logger.info(f"Model created with {param_counts['total']:,} total parameters")
+    logger.info(
+        f"Model created with {param_counts['total']:,} total parameters")
     logger.info(f"Trainable parameters: {param_counts['trainable']:,}")
     logger.info(f"Vision backbone: {config.vision_backbone}")
     logger.info(f"Language backbone: {config.language_backbone}")
@@ -152,7 +156,8 @@ def create_tokenizer(model_name: str = PRETRAINED_LANGUAGE_MODEL) -> AutoTokeniz
     """
     try:
         # Try to load tokenizer from pretrained model
-        tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_name, trust_remote_code=True)
         logger.info(f"Loaded tokenizer from {model_name}")
     except Exception as e:
         # Fallback to GPT-2 tokenizer (compatible with tinyllm/30M-0.4)
@@ -188,7 +193,7 @@ def generate_model_card(
     carbon_emissions: float = None,
 ) -> str:
     """Generate model card for HuggingFace Hub."""
-    
+
     # Model size category
     if total_params < 100_000_000:
         size_category = "Tiny (~35M parameters)"
@@ -196,20 +201,20 @@ def generate_model_card(
     else:
         size_category = "Small (~137M parameters)"
         variant_name = "embervlm-small"
-    
+
     # Backbone descriptions
     vision_desc = {
         'repvit': 'RepViT-M0.9 (~5M params)',
         'mobilevit_xs': 'Apple MobileViT-XS (~2.3M params)'
     }.get(vision_backbone, vision_backbone)
-    
+
     language_desc = {
         'tinyllm': 'TinyLLM-30M (30M params)',
         'smollm_135m': 'SmolLM-135M (135M params)'
     }.get(language_backbone, language_backbone)
-    
+
     carbon_info = f"\n- **Carbon Emissions**: {carbon_emissions:.4f} kg CO2eq" if carbon_emissions else ""
-    
+
     card = f"""---
 language:
 - en
@@ -302,7 +307,8 @@ print(outputs)
 def count_model_parameters(model) -> tuple:
     """Count total and trainable parameters."""
     total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    trainable_params = sum(p.numel()
+                           for p in model.parameters() if p.requires_grad)
     return total_params, trainable_params
 
 
@@ -316,39 +322,41 @@ def push_to_hub(
 ):
     """Push model to HuggingFace Hub with automatic repo selection."""
     import os
-    
+
     # Check if push is disabled
     if os.environ.get('DISABLE_HUB_PUSH', '').lower() in ('1', 'true', 'yes'):
-        logger.info("Hub push disabled via DISABLE_HUB_PUSH environment variable")
+        logger.info(
+            "Hub push disabled via DISABLE_HUB_PUSH environment variable")
         return
-    
+
     # Check for HF token
     hf_token = os.environ.get('HF_TOKEN')
     if not hf_token:
         logger.warning("HF_TOKEN not found in environment. Skipping hub push.")
-        logger.warning("To enable hub push, set HF_TOKEN environment variable with your HuggingFace token.")
+        logger.warning(
+            "To enable hub push, set HF_TOKEN environment variable with your HuggingFace token.")
         return
-    
+
     # Determine repo name based on backbone
     total_params, trainable_params = count_model_parameters(model)
-    
+
     if total_params < 100_000_000:
         repo_name = "embervlm-tiny"
     else:
         repo_name = "embervlm-small"
-    
+
     repo_id = f"{hub_username}/{repo_name}"
-    
+
     logger.info("="*60)
     logger.info(f"Pushing model to HuggingFace Hub: {repo_id}")
     logger.info(f"  Vision: {vision_backbone}")
     logger.info(f"  Language: {language_backbone}")
     logger.info(f"  Total params: {total_params:,}")
     logger.info("="*60)
-    
+
     try:
         from huggingface_hub import HfApi, create_repo
-        
+
         # Create repo if it doesn't exist
         try:
             create_repo(
@@ -360,7 +368,7 @@ def push_to_hub(
             logger.info(f"✓ Repository created/verified: {repo_id}")
         except Exception as e:
             logger.warning(f"Could not create repo (may already exist): {e}")
-        
+
         # Generate model card
         model_card = generate_model_card(
             vision_backbone=vision_backbone,
@@ -369,7 +377,7 @@ def push_to_hub(
             trainable_params=trainable_params,
             carbon_emissions=carbon_emissions,
         )
-        
+
         # Push model
         logger.info("Uploading model weights...")
         model.push_to_hub(
@@ -378,7 +386,7 @@ def push_to_hub(
             commit_message=f"Upload {repo_name} ({vision_backbone}+{language_backbone})",
         )
         logger.info("✓ Model weights uploaded")
-        
+
         # Push tokenizer
         logger.info("Uploading tokenizer...")
         tokenizer.push_to_hub(
@@ -387,7 +395,7 @@ def push_to_hub(
             commit_message=f"Upload tokenizer for {repo_name}",
         )
         logger.info("✓ Tokenizer uploaded")
-        
+
         # Push model card
         logger.info("Uploading model card...")
         api = HfApi()
@@ -399,13 +407,15 @@ def push_to_hub(
             commit_message=f"Add model card for {repo_name}",
         )
         logger.info("✓ Model card uploaded")
-        
+
         logger.info("="*60)
-        logger.info(f"✅ Successfully pushed to: https://huggingface.co/{repo_id}")
+        logger.info(
+            f"✅ Successfully pushed to: https://huggingface.co/{repo_id}")
         logger.info("="*60)
-        
+
     except ImportError:
-        logger.warning("huggingface_hub not installed. Install with: pip install huggingface_hub")
+        logger.warning(
+            "huggingface_hub not installed. Install with: pip install huggingface_hub")
     except Exception as e:
         logger.error(f"Failed to push to hub: {e}")
         logger.warning("Training completed successfully, but hub push failed.")
@@ -418,18 +428,22 @@ def run_all_stages(args: argparse.Namespace):
     if args.size == 'tiny':
         vision_backbone = 'repvit'
         language_backbone = 'tinyllm'
+        wandb_project = 'embervlm-tiny'
     else:  # small
         vision_backbone = 'mobilevit_xs'
         language_backbone = 'smollm_135m'
+        wandb_project = 'embervlm-small'
     
     logger.info(f"Model size: {args.size}")
     logger.info(f"  Vision backbone: {vision_backbone}")
     logger.info(f"  Language backbone: {language_backbone}")
+    logger.info(f"  W&B project: {wandb_project}")
 
     # Setup distributed training if enabled
     if args.distributed:
         rank, local_rank, world_size = setup_distributed()
-        logger.info(f"Distributed training initialized: rank={rank}, local_rank={local_rank}, world_size={world_size}")
+        logger.info(
+            f"Distributed training initialized: rank={rank}, local_rank={local_rank}, world_size={world_size}")
         device = torch.device(f'cuda:{local_rank}')
     else:
         rank = 0
@@ -447,7 +461,7 @@ def run_all_stages(args: argparse.Namespace):
     backbone_suffix = f"{vision_backbone}_{language_backbone}"
     output_dir = base_output_dir / backbone_suffix
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     logger.info("="*60)
     logger.info(f"Output directory: {output_dir}")
     logger.info(f"Vision backbone: {vision_backbone}")
@@ -479,7 +493,8 @@ def run_all_stages(args: argparse.Namespace):
     # Resize embeddings for special tokens - MUST happen before any DDP wrapping
     # This ensures all ranks have the same embedding size
     target_vocab_size = len(tokenizer)
-    logger.info(f"Target vocabulary size (with special tokens): {target_vocab_size}")
+    logger.info(
+        f"Target vocabulary size (with special tokens): {target_vocab_size}")
 
     # Resize embeddings
     if hasattr(model.language_model, 'resize_token_embeddings'):
@@ -487,25 +502,30 @@ def run_all_stages(args: argparse.Namespace):
         logger.info(f"Resized token embeddings to {target_vocab_size}")
     elif hasattr(model.language_model, 'model'):
         if hasattr(model.language_model.model, 'resize_token_embeddings'):
-            model.language_model.model.resize_token_embeddings(target_vocab_size)
+            model.language_model.model.resize_token_embeddings(
+                target_vocab_size)
             logger.info(f"Resized token embeddings to {target_vocab_size}")
 
     # CRITICAL: Also update the model's internal config to reflect new vocab size
     # This ensures consistency throughout training
     if hasattr(model.language_model, 'config'):
         model.language_model.config.vocab_size = target_vocab_size
-        logger.info(f"Updated language_model.config.vocab_size to {target_vocab_size}")
+        logger.info(
+            f"Updated language_model.config.vocab_size to {target_vocab_size}")
     if hasattr(model.language_model, 'model') and hasattr(model.language_model.model, 'config'):
         model.language_model.model.config.vocab_size = target_vocab_size
-        logger.info(f"Updated language_model.model.config.vocab_size to {target_vocab_size}")
+        logger.info(
+            f"Updated language_model.model.config.vocab_size to {target_vocab_size}")
 
     # Verify embedding size after resize
     actual_vocab_size = None
     if hasattr(model.language_model, 'get_input_embeddings'):
-        actual_vocab_size = model.language_model.get_input_embeddings().weight.shape[0]
+        actual_vocab_size = model.language_model.get_input_embeddings(
+        ).weight.shape[0]
     elif hasattr(model.language_model, 'model'):
         if hasattr(model.language_model.model, 'get_input_embeddings'):
-            actual_vocab_size = model.language_model.model.get_input_embeddings().weight.shape[0]
+            actual_vocab_size = model.language_model.model.get_input_embeddings(
+            ).weight.shape[0]
 
     if actual_vocab_size is not None:
         if actual_vocab_size != target_vocab_size:
@@ -521,11 +541,13 @@ def run_all_stages(args: argparse.Namespace):
         # User explicitly provided a checkpoint path
         checkpoint_path = Path(args.resume_from_checkpoint)
         if not checkpoint_path.exists():
-            logger.warning(f"Specified checkpoint {checkpoint_path} does not exist")
+            logger.warning(
+                f"Specified checkpoint {checkpoint_path} does not exist")
             checkpoint_path = None
     elif args.stage != 'all' and args.stage != '1':
         # Running a specific stage (not 'all' or stage 1) - auto-detect previous stage checkpoint
-        logger.info(f"Auto-detecting checkpoint from previous stage for Stage {args.stage}...")
+        logger.info(
+            f"Auto-detecting checkpoint from previous stage for Stage {args.stage}...")
         checkpoint_path = get_previous_stage_checkpoint(output_dir, args.stage)
 
     if checkpoint_path and checkpoint_path.exists():
@@ -534,8 +556,10 @@ def run_all_stages(args: argparse.Namespace):
         load_checkpoint(model, None, None, str(checkpoint_path))
         logger.info(f"✓ Loaded model weights from {checkpoint_path}")
     elif args.stage != 'all' and args.stage != '1':
-        logger.warning(f"No checkpoint found for Stage {args.stage}. Starting from base model weights.")
-        logger.warning(f"For best results, run previous stages first or provide --resume_from_checkpoint")
+        logger.warning(
+            f"No checkpoint found for Stage {args.stage}. Starting from base model weights.")
+        logger.warning(
+            f"For best results, run previous stages first or provide --resume_from_checkpoint")
 
     # Synchronize all ranks after model initialization
     if args.distributed:
@@ -557,6 +581,7 @@ def run_all_stages(args: argparse.Namespace):
         log_steps=args.log_steps,
         push_to_hub=False,  # We handle hub push manually after training
         hub_model_id=None,
+        wandb_project=wandb_project,  # Size-specific project name
     )
 
     # Carbon tracking - ONLY on rank 0 to prevent duplicate tracking
@@ -593,7 +618,8 @@ def run_all_stages(args: argparse.Namespace):
             })
             stage1_config = TrainingConfig(**stage1_dict)
 
-            stage1_data_path = Path(args.stage1_data) if args.stage1_data else None
+            stage1_data_path = Path(
+                args.stage1_data) if args.stage1_data else None
             if stage1_data_path and stage1_data_path.exists():
                 run_stage1_training(
                     model=model,
@@ -630,7 +656,8 @@ def run_all_stages(args: argparse.Namespace):
             })
             stage2_config = TrainingConfig(**stage2_dict)
 
-            stage2_data_path = Path(args.stage2_data) if args.stage2_data else None
+            stage2_data_path = Path(
+                args.stage2_data) if args.stage2_data else None
             if stage2_data_path and stage2_data_path.exists():
                 run_stage2_training(
                     model=model,
@@ -643,7 +670,8 @@ def run_all_stages(args: argparse.Namespace):
                 from embervlm.training.train_utils import unwrap_model
                 model = unwrap_model(model)
             else:
-                logger.warning(f"Stage 2 data not found at {stage2_data_path}, skipping...")
+                logger.warning(
+                    f"Stage 2 data not found at {stage2_data_path}, skipping...")
 
         # Clean up and sync before Stage 3
         if args.stage in ['all', '3']:
@@ -671,29 +699,39 @@ def run_all_stages(args: argparse.Namespace):
             # Check embedding size vs tokenizer size
             current_vocab_size = None
             if hasattr(model_unwrapped.language_model, 'get_input_embeddings'):
-                current_vocab_size = model_unwrapped.language_model.get_input_embeddings().weight.shape[0]
+                current_vocab_size = model_unwrapped.language_model.get_input_embeddings(
+                ).weight.shape[0]
             elif hasattr(model_unwrapped.language_model, 'model'):
                 if hasattr(model_unwrapped.language_model.model, 'get_input_embeddings'):
-                    current_vocab_size = model_unwrapped.language_model.model.get_input_embeddings().weight.shape[0]
+                    current_vocab_size = model_unwrapped.language_model.model.get_input_embeddings(
+                    ).weight.shape[0]
 
             required_vocab_size = len(tokenizer)
 
             if current_vocab_size is not None and current_vocab_size != required_vocab_size:
-                logger.warning(f"⚠️ CRITICAL: Embedding size mismatch detected!")
-                logger.warning(f"   Current embedding size: {current_vocab_size}")
-                logger.warning(f"   Required (tokenizer size): {required_vocab_size}")
-                logger.warning(f"   Special tokens in use: {tokenizer.additional_special_tokens}")
+                logger.warning(
+                    f"⚠️ CRITICAL: Embedding size mismatch detected!")
+                logger.warning(
+                    f"   Current embedding size: {current_vocab_size}")
+                logger.warning(
+                    f"   Required (tokenizer size): {required_vocab_size}")
+                logger.warning(
+                    f"   Special tokens in use: {tokenizer.additional_special_tokens}")
                 logger.info(f"🔧 Resizing embeddings to match tokenizer...")
 
                 # Resize embeddings to match tokenizer
                 try:
                     if hasattr(model_unwrapped.language_model, 'resize_token_embeddings'):
-                        model_unwrapped.language_model.resize_token_embeddings(required_vocab_size)
-                        logger.info(f"✓ Resized embeddings via resize_token_embeddings()")
+                        model_unwrapped.language_model.resize_token_embeddings(
+                            required_vocab_size)
+                        logger.info(
+                            f"✓ Resized embeddings via resize_token_embeddings()")
                     elif hasattr(model_unwrapped.language_model, 'model'):
                         if hasattr(model_unwrapped.language_model.model, 'resize_token_embeddings'):
-                            model_unwrapped.language_model.model.resize_token_embeddings(required_vocab_size)
-                            logger.info(f"✓ Resized embeddings via model.resize_token_embeddings()")
+                            model_unwrapped.language_model.model.resize_token_embeddings(
+                                required_vocab_size)
+                            logger.info(
+                                f"✓ Resized embeddings via model.resize_token_embeddings()")
 
                     # Also resize LM head if it exists
                     if hasattr(model_unwrapped.language_model, 'lm_head'):
@@ -709,7 +747,8 @@ def run_all_stages(args: argparse.Namespace):
                             if old_lm_head.bias is not None:
                                 new_lm_head.bias[:current_vocab_size] = old_lm_head.bias
                         model_unwrapped.language_model.lm_head = new_lm_head
-                        logger.info(f"✓ Resized LM head to {required_vocab_size}")
+                        logger.info(
+                            f"✓ Resized LM head to {required_vocab_size}")
                     elif hasattr(model_unwrapped.language_model, 'model'):
                         if hasattr(model_unwrapped.language_model.model, 'lm_head'):
                             old_lm_head = model_unwrapped.language_model.model.lm_head
@@ -724,28 +763,34 @@ def run_all_stages(args: argparse.Namespace):
                                 if old_lm_head.bias is not None:
                                     new_lm_head.bias[:current_vocab_size] = old_lm_head.bias
                             model_unwrapped.language_model.model.lm_head = new_lm_head
-                            logger.info(f"✓ Resized LM head to {required_vocab_size}")
+                            logger.info(
+                                f"✓ Resized LM head to {required_vocab_size}")
 
                 except Exception as e:
                     logger.error(f"❌ Failed to resize embeddings: {e}")
-                    raise RuntimeError(f"Failed to resize embeddings to match tokenizer vocabulary: {e}")
+                    raise RuntimeError(
+                        f"Failed to resize embeddings to match tokenizer vocabulary: {e}")
 
                 # Verify resize worked
                 new_vocab_size = None
                 if hasattr(model_unwrapped.language_model, 'get_input_embeddings'):
-                    new_vocab_size = model_unwrapped.language_model.get_input_embeddings().weight.shape[0]
+                    new_vocab_size = model_unwrapped.language_model.get_input_embeddings(
+                    ).weight.shape[0]
                 elif hasattr(model_unwrapped.language_model, 'model'):
                     if hasattr(model_unwrapped.language_model.model, 'get_input_embeddings'):
-                        new_vocab_size = model_unwrapped.language_model.model.get_input_embeddings().weight.shape[0]
+                        new_vocab_size = model_unwrapped.language_model.model.get_input_embeddings(
+                        ).weight.shape[0]
 
                 if new_vocab_size == required_vocab_size:
-                    logger.info(f"✅ Embedding resize successful: {new_vocab_size} tokens")
+                    logger.info(
+                        f"✅ Embedding resize successful: {new_vocab_size} tokens")
                 else:
                     error_msg = f"❌ Embedding resize FAILED! Size is {new_vocab_size}, expected {required_vocab_size}"
                     logger.error(error_msg)
                     raise RuntimeError(error_msg)
             else:
-                logger.info(f"✓ Embedding size matches tokenizer: {required_vocab_size} tokens")
+                logger.info(
+                    f"✓ Embedding size matches tokenizer: {required_vocab_size} tokens")
 
             # Move model back to original device
             model_unwrapped = model_unwrapped.to(device_before)
@@ -763,7 +808,8 @@ def run_all_stages(args: argparse.Namespace):
             })
             stage3_config = TrainingConfig(**stage3_dict)
 
-            robot_dir = Path(args.robot_data) if args.robot_data else Path(Path(__file__).parent.parent / 'robot-selection-dataset')
+            robot_dir = Path(args.robot_data) if args.robot_data else Path(
+                Path(__file__).parent.parent / 'robot-selection-dataset')
 
             # Create robot selection data if needed
             if not robot_dir.exists():
@@ -783,7 +829,8 @@ def run_all_stages(args: argparse.Namespace):
                 from embervlm.training.train_utils import unwrap_model
                 model = unwrap_model(model)
             else:
-                logger.warning(f"Stage 3 robot data not found at {robot_dir}, skipping...")
+                logger.warning(
+                    f"Stage 3 robot data not found at {robot_dir}, skipping...")
 
         # Stage 4: Reasoning Integration
         if args.stage in ['all', '4']:
@@ -804,7 +851,8 @@ def run_all_stages(args: argparse.Namespace):
             # 1. Explicitly provided reasoning_data path
             # 2. outputs/reasoning-data directory
             # 3. Fall back to robot_data (auto-generates reasoning chains)
-            reasoning_dir = args.reasoning_data or str(output_dir / 'reasoning-data')
+            reasoning_dir = args.reasoning_data or str(
+                output_dir / 'reasoning-data')
 
             data_dir_to_use = None
             data_source_type = None
@@ -816,14 +864,17 @@ def run_all_stages(args: argparse.Namespace):
                 # Fall back to robot selection data - ReasoningDataset will auto-generate chains
                 data_dir_to_use = args.robot_data
                 data_source_type = "robot selection data (auto-generating reasoning chains)"
-                logger.info("No dedicated reasoning data found. Using robot selection data with auto-generated reasoning chains.")
+                logger.info(
+                    "No dedicated reasoning data found. Using robot selection data with auto-generated reasoning chains.")
             else:
                 # Check default robot data location
-                default_robot_dir = str(output_dir.parent / 'robot-selection-dataset')
+                default_robot_dir = str(
+                    output_dir.parent / 'robot-selection-dataset')
                 if Path(default_robot_dir).exists():
                     data_dir_to_use = default_robot_dir
                     data_source_type = "robot selection data (auto-generating reasoning chains)"
-                    logger.info("No dedicated reasoning data found. Using robot selection data with auto-generated reasoning chains.")
+                    logger.info(
+                        "No dedicated reasoning data found. Using robot selection data with auto-generated reasoning chains.")
 
             if data_dir_to_use is not None:
                 logger.info(f"Stage 4 data source: {data_source_type}")
@@ -840,10 +891,13 @@ def run_all_stages(args: argparse.Namespace):
                 from embervlm.training.train_utils import unwrap_model
                 model = unwrap_model(model)
             else:
-                logger.warning("Stage 4: No reasoning or robot selection data found, skipping...")
+                logger.warning(
+                    "Stage 4: No reasoning or robot selection data found, skipping...")
                 logger.warning("  To run Stage 4, provide either:")
-                logger.warning("    --reasoning_data <path>  (explicit reasoning chains)")
-                logger.warning("    --robot_data <path>      (will auto-generate reasoning chains)")
+                logger.warning(
+                    "    --reasoning_data <path>  (explicit reasoning chains)")
+                logger.warning(
+                    "    --robot_data <path>      (will auto-generate reasoning chains)")
 
         # Unwrap model before saving (in case it's still wrapped)
         from embervlm.training.train_utils import unwrap_model
@@ -865,7 +919,8 @@ def run_all_stages(args: argparse.Namespace):
         if carbon_tracker is not None:
             try:
                 total_emissions = carbon_tracker.stop()
-                logger.info(f"Total training emissions: {total_emissions:.4f} kg CO2eq")
+                logger.info(
+                    f"Total training emissions: {total_emissions:.4f} kg CO2eq")
             except Exception as e:
                 logger.warning(f"Error stopping carbon tracker: {e}")
 
@@ -885,7 +940,8 @@ def run_all_stages(args: argparse.Namespace):
         if carbon_tracker is not None and total_emissions is None:
             try:
                 total_emissions = carbon_tracker.stop()
-                logger.info(f"Total training emissions: {total_emissions:.4f} kg CO2eq")
+                logger.info(
+                    f"Total training emissions: {total_emissions:.4f} kg CO2eq")
             except Exception as e:
                 logger.warning(f"Error stopping carbon tracker: {e}")
 
@@ -902,48 +958,48 @@ def main():
 
     # General arguments
     parser.add_argument('--output_dir', type=str, default='./outputs',
-                       help='Output directory')
+                        help='Output directory')
     parser.add_argument('--seed', type=int, default=42,
-                       help='Random seed')
+                        help='Random seed')
     parser.add_argument('--stage', type=str, default='all',
-                       choices=['all', '1', '2', '3', '4'],
-                       help='Training stage to run')
+                        choices=['all', '1', '2', '3', '4'],
+                        help='Training stage to run')
 
     # Model size selection
     parser.add_argument('--size', type=str, default='tiny',
-                       choices=['tiny', 'small'],
-                       help='Model size: tiny (~35M params, repvit+tinyllm) or small (~137M params, mobilevit_xs+smollm_135m)')
+                        choices=['tiny', 'small'],
+                        help='Model size: tiny (~35M params, repvit+tinyllm) or small (~137M params, mobilevit_xs+smollm_135m)')
 
     # Distributed training
     parser.add_argument('--distributed', action='store_true',
-                       help='Use distributed training')
+                        help='Use distributed training')
     parser.add_argument('--mixed_precision', type=str, default='bf16',
-                       choices=['fp32', 'fp16', 'bf16'],
-                       help='Mixed precision training')
+                        choices=['fp32', 'fp16', 'bf16'],
+                        help='Mixed precision training')
 
     # Training hyperparameters
     parser.add_argument('--batch_size', type=int, default=32,
-                       help='Batch size per GPU')
+                        help='Batch size per GPU')
     parser.add_argument('--learning_rate', type=float, default=2e-4,
-                       help='Learning rate')
+                        help='Learning rate')
     parser.add_argument('--gradient_accumulation', type=int, default=4,
-                       help='Gradient accumulation steps')
+                        help='Gradient accumulation steps')
     parser.add_argument('--save_steps', type=int, default=500,
-                       help='Save checkpoint every N steps')
+                        help='Save checkpoint every N steps')
     parser.add_argument('--log_steps', type=int, default=50,
-                       help='Log metrics every N steps')
+                        help='Log metrics every N steps')
     parser.add_argument('--eval_steps', type=int, default=500,
-                       help='Evaluate every N steps')
+                        help='Evaluate every N steps')
 
     # Data paths
     parser.add_argument('--stage1_data', type=str, default='data/base_vlm',
-                       help='Path to Stage 1 alignment data')
+                        help='Path to Stage 1 alignment data')
     parser.add_argument('--stage2_data', type=str, default='data/base_vlm/llava',
-                       help='Path to Stage 2 instruction data')
+                        help='Path to Stage 2 instruction data')
     parser.add_argument('--robot_data', type=str, default='robot-selection-dataset',
-                       help='Path to robot selection data')
+                        help='Path to robot selection data')
     parser.add_argument('--reasoning_data', type=str, default=None,
-                       help='Path to reasoning augmented data')
+                        help='Path to reasoning augmented data')
 
     # Stage-specific epochs
     parser.add_argument('--stage1_epochs', type=int, default=3)
@@ -958,15 +1014,15 @@ def main():
 
     # HuggingFace Hub (automatic push after training)
     parser.add_argument('--hub_username', type=str, default=None,
-                       help='HuggingFace username/org for automatic model push. '
-                            'Models push to {username}/embervlm-tiny (--size tiny) or '
-                            '{username}/embervlm-small (--size small). '
-                            'Requires HF_TOKEN environment variable. '
-                            'Set DISABLE_HUB_PUSH=1 to skip pushing.')
+                        help='HuggingFace username/org for automatic model push. '
+                        'Models push to {username}/embervlm-tiny (--size tiny) or '
+                        '{username}/embervlm-small (--size small). '
+                        'Requires HF_TOKEN environment variable. '
+                        'Set DISABLE_HUB_PUSH=1 to skip pushing.')
 
     # Resume from checkpoint
     parser.add_argument('--resume_from_checkpoint', type=str, default=None,
-                       help='Path to checkpoint to resume from (e.g., outputs/stage2/checkpoint-789)')
+                        help='Path to checkpoint to resume from (e.g., outputs/stage2/checkpoint-789)')
 
     args = parser.parse_args()
 
@@ -978,4 +1034,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

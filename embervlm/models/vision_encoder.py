@@ -61,7 +61,8 @@ class Conv2d_BN(nn.Sequential):
         c, bn = self._modules.values()
         w = bn.weight / (bn.running_var + bn.eps) ** 0.5
         w = c.weight * w[:, None, None, None]
-        b = bn.bias - bn.running_mean * bn.weight / (bn.running_var + bn.eps) ** 0.5
+        b = bn.bias - bn.running_mean * bn.weight / \
+            (bn.running_var + bn.eps) ** 0.5
 
         m = nn.Conv2d(
             w.size(1) * c.groups, w.size(0), w.shape[2:],
@@ -131,11 +132,13 @@ class RepVGGDW(nn.Module):
         conv_w = conv.weight
         conv_b = conv.bias
         conv1_w = conv1.weight
-        conv1_b = conv1.bias if conv1.bias is not None else torch.zeros_like(conv_b)
+        conv1_b = conv1.bias if conv1.bias is not None else torch.zeros_like(
+            conv_b)
 
         conv1_w = F.pad(conv1_w, [1, 1, 1, 1])
         identity = F.pad(
-            torch.ones(conv1_w.shape[0], conv1_w.shape[1], 1, 1, device=conv1_w.device),
+            torch.ones(conv1_w.shape[0], conv1_w.shape[1],
+                       1, 1, device=conv1_w.device),
             [1, 1, 1, 1]
         )
 
@@ -148,7 +151,8 @@ class RepVGGDW(nn.Module):
         bn = self.bn
         w = bn.weight / (bn.running_var + bn.eps) ** 0.5
         w = conv.weight * w[:, None, None, None]
-        b = bn.bias + (conv.bias - bn.running_mean) * bn.weight / (bn.running_var + bn.eps) ** 0.5
+        b = bn.bias + (conv.bias - bn.running_mean) * \
+            bn.weight / (bn.running_var + bn.eps) ** 0.5
         conv.weight.data.copy_(w)
         conv.bias.data.copy_(b)
         return conv
@@ -174,7 +178,8 @@ class RepViTBlock(nn.Module):
 
         if stride == 2:
             self.token_mixer = nn.Sequential(
-                Conv2d_BN(inp, inp, kernel_size, stride, (kernel_size - 1) // 2, groups=inp),
+                Conv2d_BN(inp, inp, kernel_size, stride,
+                          (kernel_size - 1) // 2, groups=inp),
                 SqueezeExcite(inp, 0.25) if use_se else nn.Identity(),
                 Conv2d_BN(inp, oup, kernel_size=1, stride=1, padding=0)
             )
@@ -225,7 +230,8 @@ class RepViT(nn.Module):
         for k, t, c, use_se, use_hs, s in self.cfgs:
             output_channel = _make_divisible(c, 8)
             exp_size = _make_divisible(input_channel * t, 8)
-            layers.append(block(input_channel, exp_size, output_channel, k, s, use_se, use_hs))
+            layers.append(block(input_channel, exp_size,
+                          output_channel, k, s, use_se, use_hs))
             input_channel = output_channel
 
         self.features = nn.ModuleList(layers)
@@ -270,7 +276,8 @@ def repvit_xxs(pretrained: bool = False) -> RepViT:
             import timm
             # Use timm's repvit_m0_9 as a lightweight pretrained base
             # This is the closest match to xxs size while being available
-            pretrained_model = timm.create_model('repvit_m0_9.dist_450e_in1k', pretrained=True)
+            pretrained_model = timm.create_model(
+                'repvit_m0_9.dist_450e_in1k', pretrained=True)
 
             # Extract compatible weights (feature extractor part)
             pretrained_dict = pretrained_model.state_dict()
@@ -284,7 +291,8 @@ def repvit_xxs(pretrained: bool = False) -> RepViT:
 
             model_dict.update(compatible_dict)
             model.load_state_dict(model_dict, strict=False)
-            print(f"Loaded {len(compatible_dict)}/{len(model_dict)} weights from timm/repvit_m0_9.dist_450e_in1k")
+            print(
+                f"Loaded {len(compatible_dict)}/{len(model_dict)} weights from timm/repvit_m0_9.dist_450e_in1k")
         except Exception as e:
             print(f"Warning: Could not load pretrained weights: {e}")
 
@@ -323,7 +331,8 @@ class RepViTEncoder(nn.Module):
             # Use timm models directly
             import timm
             timm_model_name = f"{model_name}.dist_450e_in1k" if "dist" not in model_name else model_name
-            self.backbone = timm.create_model(timm_model_name, pretrained=pretrained, num_classes=0)
+            self.backbone = timm.create_model(
+                timm_model_name, pretrained=pretrained, num_classes=0)
 
             # Determine backbone output dimension based on model size
             # Note: These are the actual output dimensions from the timm models
@@ -336,9 +345,11 @@ class RepViTEncoder(nn.Module):
             }
             base_name = model_name.split('.')[0]
             self.backbone_dim = model_dims.get(base_name, 384)
-            print(f"Using timm model: {timm_model_name} with output_dim={self.backbone_dim}")
+            print(
+                f"Using timm model: {timm_model_name} with output_dim={self.backbone_dim}")
         else:
-            raise ValueError(f"Unknown model: {model_name}. Use 'repvit_xxs' or timm model like 'repvit_m0_9'")
+            raise ValueError(
+                f"Unknown model: {model_name}. Use 'repvit_xxs' or timm model like 'repvit_m0_9'")
 
         # Adaptive pooling to get fixed number of tokens
         pool_size = int(num_visual_tokens ** 0.5)
@@ -410,7 +421,8 @@ class RepViTEncoder(nn.Module):
 
         # Reshape to sequence of tokens for normalization
         B, C, h, w = pooled_features.shape
-        visual_tokens = pooled_features.permute(0, 2, 3, 1).reshape(B, h * w, C)
+        visual_tokens = pooled_features.permute(
+            0, 2, 3, 1).reshape(B, h * w, C)
 
         # Apply layer norm in the correct dimension
         visual_tokens = self.ln_vision(visual_tokens)  # [B, h*w, C]
@@ -493,8 +505,9 @@ class MobileViTEncoder(nn.Module):
 
         # Load official Apple MobileViT from HuggingFace
         # Default: apple/mobilevit-x-small (~2.3M params)
-        print(f"Loading official Apple MobileViT from HuggingFace: {model_name}...")
-        
+        print(
+            f"Loading official Apple MobileViT from HuggingFace: {model_name}...")
+
         if pretrained:
             self.backbone = AutoModel.from_pretrained(
                 model_name,
@@ -506,7 +519,8 @@ class MobileViTEncoder(nn.Module):
             self.backbone = AutoModel.from_config(config)
 
         # MobileViT-XS output dimension is 384
-        self.backbone_dim = self.backbone.config.hidden_sizes[-1]  # Last layer hidden size
+        # Last layer hidden size
+        self.backbone_dim = self.backbone.config.hidden_sizes[-1]
         print(f"Loaded MobileViT with output_dim={self.backbone_dim}")
 
         # Adaptive pooling to get fixed number of tokens
@@ -577,7 +591,8 @@ class MobileViTEncoder(nn.Module):
 
         # Extract features from HuggingFace MobileViT backbone
         with torch.set_grad_enabled(not self.backbone.training):
-            outputs = self.backbone(pixel_values, output_hidden_states=True, return_dict=True)
+            outputs = self.backbone(
+                pixel_values, output_hidden_states=True, return_dict=True)
             # Get last hidden state from the convolutional layers
             # HuggingFace MobileViT returns last_hidden_state in [B, C, H, W] format
             features = outputs.last_hidden_state
@@ -588,7 +603,8 @@ class MobileViTEncoder(nn.Module):
 
         # Reshape to sequence of tokens
         B, C, h, w = pooled_features.shape
-        visual_tokens = pooled_features.permute(0, 2, 3, 1).reshape(B, h * w, C)
+        visual_tokens = pooled_features.permute(
+            0, 2, 3, 1).reshape(B, h * w, C)
 
         # Apply layer norm
         visual_tokens = self.ln_vision(visual_tokens)  # [B, h*w, C]
@@ -709,9 +725,10 @@ class ImagePreprocessor:
             )
 
         # Normalize
-        mean = torch.tensor(self.mean, device=images.device, dtype=images.dtype)
+        mean = torch.tensor(
+            self.mean, device=images.device, dtype=images.dtype)
         std = torch.tensor(self.std, device=images.device, dtype=images.dtype)
-        images = (images - mean[None, :, None, None]) / std[None, :, None, None]
+        images = (images - mean[None, :, None, None]) / \
+            std[None, :, None, None]
 
         return images
-
