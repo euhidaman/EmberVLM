@@ -518,18 +518,13 @@ class MobileViTEncoder(nn.Module):
             config = AutoConfig.from_pretrained(model_name)
             self.backbone = AutoModel.from_config(config)
 
-        # MobileViT-XS output dimension is 384
-        # Get the actual output dimension from the model's last hidden state
-        # For apple/mobilevit-x-small, this is 384 (not hidden_sizes[-1])
-        if hasattr(self.backbone.config, 'neck_hidden_sizes'):
-            # MobileViT has neck hidden sizes, use the last one
-            self.backbone_dim = self.backbone.config.neck_hidden_sizes[-1] * 2  # 192 * 2 = 384
-        elif hasattr(self.backbone.config, 'last_hidden_size'):
-            self.backbone_dim = self.backbone.config.last_hidden_size
-        else:
-            # Fallback: use hidden_size or default to 384 for mobilevit-x-small
-            self.backbone_dim = getattr(self.backbone.config, 'hidden_size', 384)
-        print(f"Loaded MobileViT with backbone_dim={self.backbone_dim}")
+        # MobileViT-XS output dimension - probe actual output to get correct dimension
+        # Run a dummy forward pass to determine actual output channels
+        with torch.no_grad():
+            dummy_input = torch.randn(1, 3, image_size, image_size)
+            dummy_output = self.backbone(dummy_input, output_hidden_states=True, return_dict=True)
+            self.backbone_dim = dummy_output.last_hidden_state.shape[1]  # [B, C, H, W] -> get C
+        print(f"Loaded MobileViT with backbone_dim={self.backbone_dim} (probed from output)")
 
         # Adaptive pooling to get fixed number of tokens
         pool_size = int(num_visual_tokens ** 0.5)
