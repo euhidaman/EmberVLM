@@ -3,6 +3,8 @@ RepViT Vision Encoder for EmberVLM
 
 A lightweight vision encoder based on RepViT architecture,
 optimized for edge deployment while maintaining strong visual understanding.
+
+Also supports MobileViT-XS as an alternative vision backbone.
 """
 
 import torch
@@ -11,6 +13,10 @@ import torch.nn.functional as F
 from typing import Optional, Tuple, Dict, Any
 from timm.models.layers import SqueezeExcite
 from timm.models.vision_transformer import trunc_normal_
+
+# Vision backbone type constants
+VISION_BACKBONE_REPVIT = "repvit"
+VISION_BACKBONE_MOBILEVIT_XS = "mobilevit_xs"
 
 
 def _make_divisible(v: float, divisor: int, min_value: Optional[int] = None) -> int:
@@ -440,6 +446,222 @@ class RepViTEncoder(nn.Module):
     def dtype(self) -> torch.dtype:
         """Get dtype of model parameters."""
         return next(self.parameters()).dtype
+
+
+class MobileViTEncoder(nn.Module):
+    """
+    MobileViT Vision Encoder wrapper for EmberVLM.
+
+    Uses MobileViT-XS (~2.3M params) from timm as an alternative to RepViT.
+    Handles image preprocessing, feature extraction, and adaptive pooling
+    to produce a fixed number of visual tokens.
+
+    MobileViT-XS output dimension is 384, matching RepViT and the default
+    fusion module configuration.
+    """
+
+    def __init__(
+        self,
+        model_name: str = "mobilevit_xs",
+        pretrained: bool = True,
+        freeze: bool = True,
+        num_visual_tokens: int = 8,
+        output_dim: int = 384,
+        image_size: int = 256,  # MobileViT default is 256
+    ):
+        super().__init__()
+
+        import timm
+
+        self.model_name = model_name
+        self.num_visual_tokens = num_visual_tokens
+        self.output_dim = output_dim
+        self.image_size = image_size
+
+        # Load MobileViT from timm
+        # Available variants: mobilevit_xxs, mobilevit_xs, mobilevit_s
+        timm_model_name = model_name
+        if not model_name.startswith('mobilevit'):
+            timm_model_name = f"mobilevit_{model_name}"
+
+        self.backbone = timm.create_model(
+            timm_model_name,
+            pretrained=pretrained,
+            num_classes=0,  # Remove classification head
+        )
+
+        # Get backbone output dimension
+        # MobileViT-XS: 384, MobileViT-XXS: 320, MobileViT-S: 640
+        model_dims = {
+            'mobilevit_xxs': 320,
+            'mobilevit_xs': 384,
+            'mobilevit_s': 640,
+        }
+        base_name = timm_model_name.split('.')[0]
+        self.backbone_dim = model_dims.get(base_name, 384)
+        print(f"Using MobileViT model: {timm_model_name} with output_dim={self.backbone_dim}")
+
+        # Adaptive pooling to get fixed number of tokens
+        pool_size = int(num_visual_tokens ** 0.5)
+        if pool_size ** 2 != num_visual_tokens:
+            # Non-square pooling
+            self.adaptive_pool = nn.AdaptiveAvgPool2d((2, 4))  # 8 tokens
+        else:
+            self.adaptive_pool = nn.AdaptiveAvgPool2d((pool_size, pool_size))
+
+        # Projection to output dimension (if backbone_dim != output_dim)
+        if self.backbone_dim != output_dim:
+            self.projection = nn.Sequential(
+                nn.Linear(self.backbone_dim, output_dim),
+                nn.LayerNorm(output_dim),
+            )
+        else:
+            self.projection = nn.Sequential(
+                nn.Linear(self.backbone_dim, output_dim),
+                nn.LayerNorm(output_dim),
+            )
+
+        # Layer norm for features
+        self.ln_vision = nn.LayerNorm(self.backbone_dim)
+
+        # Freeze backbone if specified
+        if freeze:
+            self._freeze_backbone()
+
+        # Initialize projection
+        self._init_weights()
+
+    def _freeze_backbone(self):
+        """Freeze backbone parameters."""
+        for param in self.backbone.parameters():
+            param.requires_grad = False
+        self.backbone.eval()
+
+    def _init_weights(self):
+        """Initialize projection weights."""
+        for module in self.projection.modules():
+            if isinstance(module, nn.Linear):
+                trunc_normal_(module.weight, std=0.02)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+            elif isinstance(module, nn.LayerNorm):
+                nn.init.constant_(module.bias, 0)
+                nn.init.constant_(module.weight, 1.0)
+
+    def forward(
+        self,
+        pixel_values: torch.Tensor,
+        return_dict: bool = True,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Forward pass through vision encoder.
+
+        Args:
+            pixel_values: Input images [B, C, H, W]
+            return_dict: Whether to return a dictionary
+
+        Returns:
+            Dictionary containing:
+                - visual_tokens: Visual embeddings [B, num_tokens, output_dim]
+                - pooled_output: Global pooled features [B, output_dim]
+        """
+        batch_size = pixel_values.size(0)
+
+        # Extract features from backbone
+        with torch.set_grad_enabled(not self.backbone.training):
+            features = self.backbone.forward_features(pixel_values)
+
+        # MobileViT forward_features returns [B, C, H, W]
+        # Adaptive pooling
+        pooled_features = self.adaptive_pool(features)  # [B, C, h, w]
+
+        # Reshape to sequence of tokens
+        B, C, h, w = pooled_features.shape
+        visual_tokens = pooled_features.permute(0, 2, 3, 1).reshape(B, h * w, C)
+
+        # Apply layer norm
+        visual_tokens = self.ln_vision(visual_tokens)  # [B, h*w, C]
+
+        # Project to output dimension
+        visual_tokens = self.projection(visual_tokens)
+
+        # Global pooled output (from original features)
+        pooled_output = F.adaptive_avg_pool2d(features, 1).flatten(1)  # [B, C]
+        pooled_output = self.projection[0](pooled_output)
+
+        if return_dict:
+            return {
+                'visual_tokens': visual_tokens,
+                'pooled_output': pooled_output,
+            }
+        return visual_tokens
+
+    def get_num_visual_tokens(self) -> int:
+        """Return number of visual tokens."""
+        return self.num_visual_tokens
+
+    def get_output_dim(self) -> int:
+        """Return output dimension."""
+        return self.output_dim
+
+    @property
+    def device(self) -> torch.device:
+        """Get device of model parameters."""
+        return next(self.parameters()).device
+
+    @property
+    def dtype(self) -> torch.dtype:
+        """Get dtype of model parameters."""
+        return next(self.parameters()).dtype
+
+
+def create_vision_encoder(
+    backbone_type: str = VISION_BACKBONE_REPVIT,
+    model_name: Optional[str] = None,
+    pretrained: bool = True,
+    freeze: bool = True,
+    num_visual_tokens: int = 8,
+    output_dim: int = 384,
+    image_size: int = 224,
+) -> nn.Module:
+    """
+    Factory function to create vision encoder.
+
+    Args:
+        backbone_type: Vision backbone type ('repvit' or 'mobilevit_xs')
+        model_name: Specific model name (overrides backbone_type defaults)
+        pretrained: Whether to load pretrained weights
+        freeze: Whether to freeze backbone parameters
+        num_visual_tokens: Number of visual tokens to output
+        output_dim: Output dimension for visual tokens
+        image_size: Input image size
+
+    Returns:
+        Vision encoder module (RepViTEncoder or MobileViTEncoder)
+    """
+    if backbone_type == VISION_BACKBONE_MOBILEVIT_XS or (model_name and 'mobilevit' in model_name):
+        actual_model_name = model_name if model_name else "mobilevit_xs"
+        # MobileViT default image size is 256
+        actual_image_size = image_size if image_size != 224 else 256
+        return MobileViTEncoder(
+            model_name=actual_model_name,
+            pretrained=pretrained,
+            freeze=freeze,
+            num_visual_tokens=num_visual_tokens,
+            output_dim=output_dim,
+            image_size=actual_image_size,
+        )
+    else:
+        # Default to RepViT
+        actual_model_name = model_name if model_name else "repvit_m0_9"
+        return RepViTEncoder(
+            model_name=actual_model_name,
+            pretrained=pretrained,
+            freeze=freeze,
+            num_visual_tokens=num_visual_tokens,
+            output_dim=output_dim,
+            image_size=image_size,
+        )
 
 
 # Image preprocessing utilities

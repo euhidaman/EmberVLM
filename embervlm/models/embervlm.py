@@ -5,8 +5,10 @@ A lightweight multimodal Vision-Language Model combining RepViT vision encoder
 and TinyLLM language backbone for robot fleet selection with incident reasoning.
 
 Uses pretrained models:
-- Vision: RepViT-XXS from THU-MIG/RepViT (HuggingFace)
-- Language: tinyllm/30M-0.4 from HuggingFace (GPT-2 style, trained on FineWeb + SHL)
+- Vision: RepViT-XXS from THU-MIG/RepViT (HuggingFace) [default]
+- Vision Alternative: MobileViT-XS from timm (~2.3M params)
+- Language: tinyllm/30M-0.4 from HuggingFace (GPT-2 style) [default]
+- Language Alternatives: SmolLM-135M, SmolLM-360M from HuggingFace
 """
 
 import torch
@@ -15,13 +17,24 @@ import torch.nn.functional as F
 from typing import Optional, Dict, Any, List, Tuple, Union
 from dataclasses import dataclass, field
 
-from embervlm.models.vision_encoder import RepViTEncoder, ImagePreprocessor
+from embervlm.models.vision_encoder import (
+    RepViTEncoder,
+    MobileViTEncoder,
+    ImagePreprocessor,
+    create_vision_encoder,
+    VISION_BACKBONE_REPVIT,
+    VISION_BACKBONE_MOBILEVIT_XS,
+)
 from embervlm.models.language_model import (
     TinyLLMBackbone,
     TinyLLMConfig,
     PretrainedTinyLLMBackbone,
+    SmolLMBackbone,
     create_language_backbone,
     PRETRAINED_TINYLLM_MODEL,
+    PRETRAINED_SMOLLM_135M,
+    BACKBONE_TINYLLM,
+    BACKBONE_SMOLLM_135M,
 )
 from embervlm.models.fusion_module import FusionModule
 from embervlm.models.reasoning_heads import ReasoningModule, ReasoningLoss
@@ -30,6 +43,10 @@ from embervlm.models.reasoning_heads import ReasoningModule, ReasoningLoss
 @dataclass
 class EmberVLMConfig:
     """Configuration for EmberVLM model."""
+
+    # Backbone selection
+    vision_backbone: str = "repvit"  # Options: 'repvit', 'mobilevit_xs'
+    language_backbone: str = "tinyllm"  # Options: 'tinyllm', 'smollm_135m'
 
     # Vision encoder
     vision_model: str = "repvit_m0_9"  # Using timm model: repvit_m0_9.dist_450e_in1k
@@ -84,6 +101,8 @@ class EmberVLMConfig:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            'vision_backbone': self.vision_backbone,
+            'language_backbone': self.language_backbone,
             'vision_model': self.vision_model,
             'vision_pretrained': self.vision_pretrained,
             'freeze_vision': self.freeze_vision,
@@ -161,9 +180,11 @@ class EmberVLM(nn.Module):
         self.special_token_ids = {}
 
     def _build_vision_encoder(self):
-        """Initialize vision encoder."""
-        self.vision_encoder = RepViTEncoder(
-            model_name=self.config.vision_model,
+        """Initialize vision encoder based on backbone selection."""
+        # Use factory function for backbone selection
+        self.vision_encoder = create_vision_encoder(
+            backbone_type=self.config.vision_backbone,
+            model_name=self.config.vision_model if self.config.vision_backbone == VISION_BACKBONE_REPVIT else None,
             pretrained=self.config.vision_pretrained,
             freeze=self.config.freeze_vision,
             num_visual_tokens=self.config.num_visual_tokens,
@@ -172,12 +193,21 @@ class EmberVLM(nn.Module):
         )
 
     def _build_language_model(self):
-        """Initialize language model (pretrained or from scratch)."""
+        """Initialize language model based on backbone selection."""
         if self.config.use_pretrained_language:
-            # Use pretrained TinyLLM from HuggingFace
+            # Determine model name from backbone type
+            model_name = self.config.pretrained_language_model
+            backbone_type = self.config.language_backbone
+
+            # Override model_name if using SmolLM backbone
+            if backbone_type == BACKBONE_SMOLLM_135M:
+                model_name = PRETRAINED_SMOLLM_135M
+
+            # Use factory function for backbone selection
             self.language_model = create_language_backbone(
                 use_pretrained=True,
-                model_name=self.config.pretrained_language_model,
+                model_name=model_name,
+                backbone_type=backbone_type,
                 freeze_base=self.config.freeze_language_base,
                 unfreeze_last_layer=self.config.unfreeze_last_layer,
             )
@@ -187,7 +217,7 @@ class EmberVLM(nn.Module):
             self.config.language_num_heads = self.language_model.config.num_attention_heads
             self.config.language_vocab_size = self.language_model.config.vocab_size
         else:
-            # Create from scratch with custom config
+            # Create from scratch with custom config (only supports TinyLLM architecture)
             llm_config = TinyLLMConfig(
                 vocab_size=self.config.language_vocab_size,
                 hidden_size=self.config.language_hidden_size,

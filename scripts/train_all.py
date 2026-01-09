@@ -20,7 +20,14 @@ from typing import Optional, Dict, Any
 import torch
 from transformers import AutoTokenizer
 
-from embervlm.models import EmberVLM, EmberVLMConfig
+from embervlm.models import (
+    EmberVLM,
+    EmberVLMConfig,
+    BACKBONE_TINYLLM,
+    BACKBONE_SMOLLM_135M,
+    VISION_BACKBONE_REPVIT,
+    VISION_BACKBONE_MOBILEVIT_XS,
+)
 from embervlm.training.train_utils import (
     TrainingConfig,
     setup_distributed,
@@ -122,20 +129,30 @@ def create_model(config: Optional[EmberVLMConfig] = None) -> EmberVLM:
     param_counts = model.count_parameters()
     logger.info(f"Model created with {param_counts['total']:,} total parameters")
     logger.info(f"Trainable parameters: {param_counts['trainable']:,}")
+    logger.info(f"Vision backbone: {config.vision_backbone}")
+    logger.info(f"Language backbone: {config.language_backbone}")
 
     return model
+
+
+def get_tokenizer_model_name(language_backbone: str) -> str:
+    """Get the appropriate tokenizer model name based on language backbone."""
+    if language_backbone == BACKBONE_SMOLLM_135M:
+        return "HuggingFaceTB/SmolLM-135M"
+    else:
+        return PRETRAINED_LANGUAGE_MODEL
 
 
 def create_tokenizer(model_name: str = PRETRAINED_LANGUAGE_MODEL) -> AutoTokenizer:
     """
     Create and configure tokenizer.
 
-    Uses the tokenizer from the pretrained language model (tinyllm/30M-0.4)
-    which is GPT-2 based with vocab_size=50257.
+    Uses the tokenizer from the pretrained language model.
+    Supports TinyLLM (GPT-2 based) and SmolLM tokenizers.
     """
     try:
         # Try to load tokenizer from pretrained model
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
         logger.info(f"Loaded tokenizer from {model_name}")
     except Exception as e:
         # Fallback to GPT-2 tokenizer (compatible with tinyllm/30M-0.4)
@@ -185,15 +202,25 @@ def run_all_stages(args: argparse.Namespace):
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create tokenizer
+    # Create tokenizer based on language backbone
     logger.info("Creating tokenizer...")
-    tokenizer = create_tokenizer()
+    tokenizer_model_name = get_tokenizer_model_name(args.language_backbone)
+    logger.info(f"Using tokenizer from: {tokenizer_model_name}")
+    tokenizer = create_tokenizer(tokenizer_model_name)
     tokenizer.save_pretrained(output_dir / 'tokenizer')
+
+    # Create model config with backbone selection
+    logger.info("Creating model config...")
+    config = EmberVLMConfig(
+        vision_backbone=args.vision_backbone,
+        language_backbone=args.language_backbone,
+    )
 
     # Create model
     logger.info("Creating model...")
-    logger.info("Loading pretrained language model from tinyllm/30M-0.4...")
-    model = create_model()
+    logger.info(f"Vision backbone: {args.vision_backbone}")
+    logger.info(f"Language backbone: {args.language_backbone}")
+    model = create_model(config)
 
     # Resize embeddings for special tokens - MUST happen before any DDP wrapping
     # This ensures all ranks have the same embedding size
@@ -607,6 +634,14 @@ def main():
     parser.add_argument('--stage', type=str, default='all',
                        choices=['all', '1', '2', '3', '4'],
                        help='Training stage to run')
+
+    # Backbone selection
+    parser.add_argument('--vision_backbone', type=str, default='repvit',
+                       choices=['repvit', 'mobilevit_xs'],
+                       help='Vision encoder backbone (default: repvit)')
+    parser.add_argument('--language_backbone', type=str, default='tinyllm',
+                       choices=['tinyllm', 'smollm_135m'],
+                       help='Language model backbone (default: tinyllm)')
 
     # Distributed training
     parser.add_argument('--distributed', action='store_true',

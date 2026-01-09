@@ -28,6 +28,13 @@ except ImportError:
 # Default pretrained model
 PRETRAINED_TINYLLM_MODEL = "tinyllm/30M-0.4"
 
+# SmolLM pretrained models
+PRETRAINED_SMOLLM_135M = "HuggingFaceTB/SmolLM-135M"
+
+# Language backbone type constants
+BACKBONE_TINYLLM = "tinyllm"
+BACKBONE_SMOLLM_135M = "smollm_135m"
+
 
 @dataclass
 class TinyLLMConfig:
@@ -1099,20 +1106,301 @@ class PretrainedTinyLLMBackbone(nn.Module):
         return next(self.parameters()).dtype
 
 
+class SmolLMBackbone(nn.Module):
+    """
+    SmolLM Backbone wrapper for EmberVLM.
+
+    Loads pretrained weights from HuggingFace Hub (SmolLM-135M or SmolLM-360M).
+    SmolLM is a family of small language models from HuggingFace.
+
+    Supported models:
+    - HuggingFaceTB/SmolLM-135M: 135M parameters
+    - HuggingFaceTB/SmolLM-360M: 360M parameters
+
+    Interface is compatible with TinyLLMBackbone and PretrainedTinyLLMBackbone.
+    """
+
+    def __init__(
+        self,
+        model_name: str = PRETRAINED_SMOLLM_135M,
+        freeze_base: bool = True,
+        unfreeze_last_layer: bool = True,
+        torch_dtype: torch.dtype = torch.bfloat16,
+    ):
+        super().__init__()
+
+        if not HF_AVAILABLE:
+            raise ImportError(
+                "transformers library is required for SmolLMBackbone. "
+                "Install with: pip install transformers"
+            )
+
+        self.model_name = model_name
+        self.torch_dtype = torch_dtype
+
+        # Load pretrained model from HuggingFace
+        print(f"Loading pretrained SmolLM from {model_name}...")
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=torch_dtype,
+            trust_remote_code=True,
+        )
+
+        # Get config from loaded model
+        self.hf_config = self.model.config
+
+        # Create compatible TinyLLMConfig for interface consistency
+        self.config = TinyLLMConfig(
+            vocab_size=self.hf_config.vocab_size,
+            hidden_size=self.hf_config.hidden_size,
+            num_hidden_layers=self.hf_config.num_hidden_layers,
+            num_attention_heads=self.hf_config.num_attention_heads,
+            intermediate_size=getattr(self.hf_config, 'intermediate_size', 4 * self.hf_config.hidden_size),
+            hidden_act="silu",  # SmolLM uses SiLU activation
+            max_position_embeddings=getattr(self.hf_config, 'max_position_embeddings', 2048),
+            use_pretrained=True,
+            pretrained_model_name=model_name,
+        )
+
+        print(f"Loaded SmolLM with hidden_size={self.config.hidden_size}, "
+              f"layers={self.config.num_hidden_layers}, "
+              f"heads={self.config.num_attention_heads}, "
+              f"vocab_size={self.config.vocab_size}")
+
+        # Freeze/unfreeze parameters
+        if freeze_base:
+            self._freeze_base()
+
+        if unfreeze_last_layer:
+            self._unfreeze_last_layer()
+
+        # Count parameters
+        total_params = sum(p.numel() for p in self.model.parameters())
+        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        print(f"Total parameters: {total_params:,}")
+        print(f"Trainable parameters: {trainable_params:,}")
+
+    def _freeze_base(self):
+        """Freeze all parameters."""
+        for param in self.model.parameters():
+            param.requires_grad = False
+
+    def _unfreeze_last_layer(self):
+        """Unfreeze the last transformer layer and output head."""
+        # SmolLM uses LlamaForCausalLM structure
+        if hasattr(self.model, 'model') and hasattr(self.model.model, 'layers'):
+            # Unfreeze last decoder layer
+            for param in self.model.model.layers[-1].parameters():
+                param.requires_grad = True
+            # Unfreeze final norm
+            if hasattr(self.model.model, 'norm'):
+                for param in self.model.model.norm.parameters():
+                    param.requires_grad = True
+
+        # Unfreeze LM head
+        if hasattr(self.model, 'lm_head'):
+            for param in self.model.lm_head.parameters():
+                param.requires_grad = True
+
+    def get_input_embeddings(self) -> nn.Embedding:
+        """Get input embedding layer."""
+        return self.model.get_input_embeddings()
+
+    def set_input_embeddings(self, new_embeddings: nn.Embedding):
+        """Set input embedding layer."""
+        self.model.set_input_embeddings(new_embeddings)
+
+    def embed_tokens(self, input_ids: torch.LongTensor) -> torch.FloatTensor:
+        """Get token embeddings with validation to prevent index out of bounds."""
+        embedding_layer = self.model.get_input_embeddings()
+        vocab_size = embedding_layer.weight.shape[0]
+        original_device = input_ids.device
+
+        # CRITICAL FIX: Round-trip through CPU for guaranteed safety
+        input_ids_cpu = input_ids.detach().cpu()
+
+        # Check and fix any invalid values on CPU (guaranteed synchronous)
+        max_val = input_ids_cpu.max().item()
+        min_val = input_ids_cpu.min().item()
+
+        if max_val >= vocab_size or min_val < 0:
+            import logging
+            logger = logging.getLogger(__name__)
+            num_invalid = ((input_ids_cpu >= vocab_size) | (input_ids_cpu < 0)).sum().item()
+            logger.warning(
+                f"⚠️ SmolLMBackbone.embed_tokens: {num_invalid} invalid tokens. "
+                f"Range: [{min_val}, {max_val}], Valid: [0, {vocab_size - 1}]. Clamping."
+            )
+            input_ids_cpu = torch.clamp(input_ids_cpu, min=0, max=vocab_size - 1)
+
+        # Move back to original device with blocking transfer
+        input_ids_safe = input_ids_cpu.to(original_device, non_blocking=False)
+
+        # Final sync before embedding lookup
+        if original_device.type == 'cuda':
+            torch.cuda.synchronize(original_device)
+
+        return embedding_layer(input_ids_safe)
+
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        attention_mask: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[List[Tuple[torch.Tensor]]] = None,
+        use_cache: bool = False,
+        output_attentions: bool = False,
+        output_hidden_states: bool = False,
+        **kwargs,
+    ) -> Dict[str, torch.Tensor]:
+        """Forward pass through the language model."""
+        vocab_size = self.model.get_input_embeddings().weight.shape[0]
+
+        # Validate input_ids
+        if input_ids is not None:
+            max_token_id = input_ids.max().item()
+            min_token_id = input_ids.min().item()
+
+            if max_token_id >= vocab_size or min_token_id < 0:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(
+                    f"⚠️ SmolLMBackbone.forward: input_ids range [{min_token_id}, {max_token_id}] "
+                    f"exceeds vocab_size {vocab_size}. Clamping."
+                )
+                input_ids = torch.clamp(input_ids, min=0, max=vocab_size - 1)
+
+        # Validate labels
+        if labels is not None:
+            valid_mask = labels != -100
+            if valid_mask.any():
+                valid_labels = labels[valid_mask]
+                max_label = valid_labels.max().item()
+                min_label = valid_labels.min().item()
+
+                if max_label >= vocab_size or min_label < 0:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.warning(
+                        f"⚠️ SmolLMBackbone.forward: labels range [{min_label}, {max_label}] "
+                        f"exceeds vocab_size {vocab_size}. Clamping."
+                    )
+                    labels = torch.where(
+                        valid_mask,
+                        torch.clamp(labels, min=0, max=vocab_size - 1),
+                        labels
+                    )
+
+        # Compute loss ourselves for validation
+        compute_loss_ourselves = labels is not None
+        labels_for_loss = labels
+
+        outputs = self.model(
+            input_ids=input_ids,
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            labels=None,  # Compute loss ourselves
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=True,  # Always get hidden states
+            return_dict=True,
+        )
+
+        # Compute loss ourselves with validation
+        loss = None
+        if compute_loss_ourselves and labels_for_loss is not None:
+            logits = outputs.logits
+
+            # Shift for causal LM
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels_for_loss[..., 1:].contiguous()
+
+            actual_vocab_size = shift_logits.size(-1)
+            flat_labels = shift_labels.view(-1)
+            valid_mask = flat_labels != -100
+
+            if valid_mask.any():
+                valid_labels = flat_labels[valid_mask]
+                max_label = valid_labels.max().item()
+                min_label = valid_labels.min().item()
+
+                if max_label >= actual_vocab_size or min_label < 0:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.error(
+                        f"❌ SmolLMBackbone loss: max={max_label}, min={min_label}, "
+                        f"logits_vocab={actual_vocab_size}. Clamping."
+                    )
+                    flat_labels = torch.where(
+                        valid_mask,
+                        torch.clamp(flat_labels, min=0, max=actual_vocab_size - 1),
+                        flat_labels
+                    )
+                    shift_labels = flat_labels.view(shift_labels.shape)
+
+            loss = F.cross_entropy(
+                shift_logits.view(-1, actual_vocab_size),
+                shift_labels.view(-1),
+                ignore_index=-100,
+            )
+
+        # Return dict format compatible with EmberVLM
+        return {
+            'loss': loss,
+            'logits': outputs.logits,
+            'past_key_values': outputs.past_key_values,
+            'hidden_states': outputs.hidden_states if output_hidden_states else None,
+            'attentions': outputs.attentions,
+            'last_hidden_state': outputs.hidden_states[-1] if outputs.hidden_states else None,
+        }
+
+    @torch.no_grad()
+    def generate(self, **kwargs) -> torch.LongTensor:
+        """Generate text."""
+        return self.model.generate(**kwargs)
+
+    def get_hidden_size(self) -> int:
+        """Return hidden size."""
+        return self.config.hidden_size
+
+    def get_vocab_size(self) -> int:
+        """Return vocabulary size."""
+        return self.config.vocab_size
+
+    def resize_token_embeddings(self, new_num_tokens: int):
+        """Resize token embeddings for special tokens."""
+        self.model.resize_token_embeddings(new_num_tokens)
+        self.config.vocab_size = new_num_tokens
+        if hasattr(self, 'hf_config'):
+            self.hf_config.vocab_size = new_num_tokens
+
+    @property
+    def device(self) -> torch.device:
+        return next(self.parameters()).device
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return next(self.parameters()).dtype
+
+
 def create_language_backbone(
     use_pretrained: bool = True,
     model_name: str = PRETRAINED_TINYLLM_MODEL,
+    backbone_type: str = BACKBONE_TINYLLM,
     config: Optional[TinyLLMConfig] = None,
     freeze_base: bool = True,
     unfreeze_last_layer: bool = True,
     torch_dtype: torch.dtype = torch.bfloat16,
-) -> Union[PretrainedTinyLLMBackbone, TinyLLMBackbone]:
+) -> Union[PretrainedTinyLLMBackbone, TinyLLMBackbone, SmolLMBackbone]:
     """
     Factory function to create language backbone.
 
     Args:
         use_pretrained: If True, load pretrained weights from HuggingFace
-        model_name: HuggingFace model name (default: tinyllm/30M-0.4)
+        model_name: HuggingFace model name (overrides backbone_type if specified)
+        backbone_type: Backbone type selector ('tinyllm', 'smollm_135m', 'smollm_360m')
         config: Custom TinyLLMConfig (only used if use_pretrained=False)
         freeze_base: Whether to freeze base model parameters
         unfreeze_last_layer: Whether to unfreeze last layer for fine-tuning
@@ -1121,13 +1409,28 @@ def create_language_backbone(
     Returns:
         Language model backbone (pretrained or from scratch)
     """
+    # Determine model name from backbone_type if using default
+    if model_name == PRETRAINED_TINYLLM_MODEL:
+        if backbone_type == BACKBONE_SMOLLM_135M:
+            model_name = PRETRAINED_SMOLLM_135M
+        # else keep default PRETRAINED_TINYLLM_MODEL
+
     if use_pretrained and HF_AVAILABLE:
-        return PretrainedTinyLLMBackbone(
-            model_name=model_name,
-            freeze_base=freeze_base,
-            unfreeze_last_layer=unfreeze_last_layer,
-            torch_dtype=torch_dtype,
-        )
+        # Select backbone class based on model name
+        if 'SmolLM' in model_name or backbone_type == BACKBONE_SMOLLM_135M:
+            return SmolLMBackbone(
+                model_name=model_name,
+                freeze_base=freeze_base,
+                unfreeze_last_layer=unfreeze_last_layer,
+                torch_dtype=torch_dtype,
+            )
+        else:
+            return PretrainedTinyLLMBackbone(
+                model_name=model_name,
+                freeze_base=freeze_base,
+                unfreeze_last_layer=unfreeze_last_layer,
+                torch_dtype=torch_dtype,
+            )
     else:
         if not HF_AVAILABLE and use_pretrained:
             print("Warning: transformers not available, falling back to random initialization")
