@@ -452,7 +452,8 @@ class MobileViTEncoder(nn.Module):
     """
     MobileViT Vision Encoder wrapper for EmberVLM.
 
-    Uses MobileViT-XS (~2.3M params) from timm as an alternative to RepViT.
+    Uses official Apple MobileViT-XS (~2.3M params) from HuggingFace as an alternative to RepViT.
+    Model: apple/mobilevit-x-small
     Handles image preprocessing, feature extraction, and adaptive pooling
     to produce a fixed number of visual tokens.
 
@@ -462,7 +463,7 @@ class MobileViTEncoder(nn.Module):
 
     def __init__(
         self,
-        model_name: str = "mobilevit_xs",
+        model_name: str = "apple/mobilevit-x-small",
         pretrained: bool = True,
         freeze: bool = True,
         num_visual_tokens: int = 8,
@@ -471,35 +472,42 @@ class MobileViTEncoder(nn.Module):
     ):
         super().__init__()
 
-        import timm
+        try:
+            from transformers import AutoModel, AutoImageProcessor
+            HF_AVAILABLE = True
+        except ImportError:
+            HF_AVAILABLE = False
+            AutoModel = None
+            AutoImageProcessor = None
+
+        if not HF_AVAILABLE:
+            raise ImportError(
+                "transformers library is required for MobileViTEncoder. "
+                "Install with: pip install transformers"
+            )
 
         self.model_name = model_name
         self.num_visual_tokens = num_visual_tokens
         self.output_dim = output_dim
         self.image_size = image_size
 
-        # Load MobileViT from timm
-        # Available variants: mobilevit_xxs, mobilevit_xs, mobilevit_s
-        timm_model_name = model_name
-        if not model_name.startswith('mobilevit'):
-            timm_model_name = f"mobilevit_{model_name}"
+        # Load official Apple MobileViT from HuggingFace
+        # Default: apple/mobilevit-x-small (~2.3M params)
+        print(f"Loading official Apple MobileViT from HuggingFace: {model_name}...")
+        
+        if pretrained:
+            self.backbone = AutoModel.from_pretrained(
+                model_name,
+                trust_remote_code=False,
+            )
+        else:
+            from transformers import AutoConfig
+            config = AutoConfig.from_pretrained(model_name)
+            self.backbone = AutoModel.from_config(config)
 
-        self.backbone = timm.create_model(
-            timm_model_name,
-            pretrained=pretrained,
-            num_classes=0,  # Remove classification head
-        )
-
-        # Get backbone output dimension
-        # MobileViT-XS: 384, MobileViT-XXS: 320, MobileViT-S: 640
-        model_dims = {
-            'mobilevit_xxs': 320,
-            'mobilevit_xs': 384,
-            'mobilevit_s': 640,
-        }
-        base_name = timm_model_name.split('.')[0]
-        self.backbone_dim = model_dims.get(base_name, 384)
-        print(f"Using MobileViT model: {timm_model_name} with output_dim={self.backbone_dim}")
+        # MobileViT-XS output dimension is 384
+        self.backbone_dim = self.backbone.config.hidden_sizes[-1]  # Last layer hidden size
+        print(f"Loaded MobileViT with output_dim={self.backbone_dim}")
 
         # Adaptive pooling to get fixed number of tokens
         pool_size = int(num_visual_tokens ** 0.5)
@@ -567,11 +575,14 @@ class MobileViTEncoder(nn.Module):
         """
         batch_size = pixel_values.size(0)
 
-        # Extract features from backbone
+        # Extract features from HuggingFace MobileViT backbone
         with torch.set_grad_enabled(not self.backbone.training):
-            features = self.backbone.forward_features(pixel_values)
+            outputs = self.backbone(pixel_values, output_hidden_states=True, return_dict=True)
+            # Get last hidden state from the convolutional layers
+            # HuggingFace MobileViT returns last_hidden_state in [B, C, H, W] format
+            features = outputs.last_hidden_state
 
-        # MobileViT forward_features returns [B, C, H, W]
+        # features shape: [B, C, H, W]
         # Adaptive pooling
         pooled_features = self.adaptive_pool(features)  # [B, C, h, w]
 
@@ -640,7 +651,7 @@ def create_vision_encoder(
         Vision encoder module (RepViTEncoder or MobileViTEncoder)
     """
     if backbone_type == VISION_BACKBONE_MOBILEVIT_XS or (model_name and 'mobilevit' in model_name):
-        actual_model_name = model_name if model_name else "mobilevit_xs"
+        actual_model_name = model_name if model_name else "apple/mobilevit-x-small"
         # MobileViT default image size is 256
         actual_image_size = image_size if image_size != 224 else 256
         return MobileViTEncoder(

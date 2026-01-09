@@ -180,8 +180,251 @@ def create_tokenizer(model_name: str = PRETRAINED_LANGUAGE_MODEL) -> AutoTokeniz
     return tokenizer
 
 
+def generate_model_card(
+    vision_backbone: str,
+    language_backbone: str,
+    total_params: int,
+    trainable_params: int,
+    carbon_emissions: float = None,
+) -> str:
+    """Generate model card for HuggingFace Hub."""
+    
+    # Model size category
+    if total_params < 100_000_000:
+        size_category = "Tiny (~35M parameters)"
+        variant_name = "embervlm-tiny"
+    else:
+        size_category = "Small (~137M parameters)"
+        variant_name = "embervlm-small"
+    
+    # Backbone descriptions
+    vision_desc = {
+        'repvit': 'RepViT-M0.9 (~5M params)',
+        'mobilevit_xs': 'Apple MobileViT-XS (~2.3M params)'
+    }.get(vision_backbone, vision_backbone)
+    
+    language_desc = {
+        'tinyllm': 'TinyLLM-30M (30M params)',
+        'smollm_135m': 'SmolLM-135M (135M params)'
+    }.get(language_backbone, language_backbone)
+    
+    carbon_info = f"\n- **Carbon Emissions**: {carbon_emissions:.4f} kg CO2eq" if carbon_emissions else ""
+    
+    card = f"""---
+language:
+- en
+license: apache-2.0
+tags:
+- vision-language
+- multimodal
+- robotics
+- edge-deployment
+- {vision_backbone}
+- {language_backbone}
+---
+
+# {variant_name.upper()}: {size_category}
+
+EmberVLM is an efficient vision-language model optimized for edge deployment and robotic applications.
+
+## Model Details
+
+- **Model Type**: Vision-Language Model (VLM)
+- **Size**: {size_category}
+- **Total Parameters**: {total_params:,}
+- **Trainable Parameters**: {trainable_params:,}{carbon_info}
+
+### Architecture
+
+- **Vision Encoder**: {vision_desc}
+- **Language Model**: {language_desc}
+- **Training Stages**: 4-stage curriculum
+  1. Visual-Language Alignment
+  2. Multimodal Instruction Tuning
+  3. Robot Fleet Selection
+  4. Chain-of-Thought Reasoning
+
+## Usage
+
+```python
+from embervlm import EmberVLM
+from transformers import AutoTokenizer
+from PIL import Image
+
+# Load model and tokenizer
+model = EmberVLM.from_pretrained("{variant_name}")
+tokenizer = AutoTokenizer.from_pretrained("{variant_name}")
+
+# Prepare input
+image = Image.open("robot_scene.jpg")
+prompt = "<image>What is happening in this scene?"
+
+# Generate response
+outputs = model.generate(image=image, prompt=prompt, tokenizer=tokenizer)
+print(outputs)
+```
+
+## Training Configuration
+
+- **Vision Backbone**: {vision_backbone}
+- **Language Backbone**: {language_backbone}
+- **Optimization**: AdamW with cosine learning rate schedule
+- **Mixed Precision**: bfloat16
+- **Stages Completed**: 1-4 (Full curriculum)
+
+## Intended Use
+
+- Edge deployment on resource-constrained devices
+- Robotic vision-language understanding
+- Real-time multimodal reasoning
+- Robot fleet selection and task planning
+
+## Limitations
+
+- Optimized for efficiency over maximum accuracy
+- Best suited for edge/mobile deployment scenarios
+- Training focused on robot-centric scenarios
+
+## Citation
+
+```bibtex
+@software{{embervlm_{variant_name.replace('-', '_')},
+  title = {{EmberVLM-{size_category.split()[0]}}},
+  author = {{EmberVLM Team}},
+  year = {{2026}},
+  url = {{https://huggingface.co/{variant_name}}}
+}}
+```
+"""
+    return card
+
+
+def count_model_parameters(model) -> tuple:
+    """Count total and trainable parameters."""
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    return total_params, trainable_params
+
+
+def push_to_hub(
+    model,
+    tokenizer,
+    vision_backbone: str,
+    language_backbone: str,
+    hub_username: str,
+    carbon_emissions: float = None,
+):
+    """Push model to HuggingFace Hub with automatic repo selection."""
+    import os
+    
+    # Check if push is disabled
+    if os.environ.get('DISABLE_HUB_PUSH', '').lower() in ('1', 'true', 'yes'):
+        logger.info("Hub push disabled via DISABLE_HUB_PUSH environment variable")
+        return
+    
+    # Check for HF token
+    hf_token = os.environ.get('HF_TOKEN')
+    if not hf_token:
+        logger.warning("HF_TOKEN not found in environment. Skipping hub push.")
+        logger.warning("To enable hub push, set HF_TOKEN environment variable with your HuggingFace token.")
+        return
+    
+    # Determine repo name based on backbone
+    total_params, trainable_params = count_model_parameters(model)
+    
+    if total_params < 100_000_000:
+        repo_name = "embervlm-tiny"
+    else:
+        repo_name = "embervlm-small"
+    
+    repo_id = f"{hub_username}/{repo_name}"
+    
+    logger.info("="*60)
+    logger.info(f"Pushing model to HuggingFace Hub: {repo_id}")
+    logger.info(f"  Vision: {vision_backbone}")
+    logger.info(f"  Language: {language_backbone}")
+    logger.info(f"  Total params: {total_params:,}")
+    logger.info("="*60)
+    
+    try:
+        from huggingface_hub import HfApi, create_repo
+        
+        # Create repo if it doesn't exist
+        try:
+            create_repo(
+                repo_id=repo_id,
+                token=hf_token,
+                private=False,
+                exist_ok=True,
+            )
+            logger.info(f"✓ Repository created/verified: {repo_id}")
+        except Exception as e:
+            logger.warning(f"Could not create repo (may already exist): {e}")
+        
+        # Generate model card
+        model_card = generate_model_card(
+            vision_backbone=vision_backbone,
+            language_backbone=language_backbone,
+            total_params=total_params,
+            trainable_params=trainable_params,
+            carbon_emissions=carbon_emissions,
+        )
+        
+        # Push model
+        logger.info("Uploading model weights...")
+        model.push_to_hub(
+            repo_id=repo_id,
+            token=hf_token,
+            commit_message=f"Upload {repo_name} ({vision_backbone}+{language_backbone})",
+        )
+        logger.info("✓ Model weights uploaded")
+        
+        # Push tokenizer
+        logger.info("Uploading tokenizer...")
+        tokenizer.push_to_hub(
+            repo_id=repo_id,
+            token=hf_token,
+            commit_message=f"Upload tokenizer for {repo_name}",
+        )
+        logger.info("✓ Tokenizer uploaded")
+        
+        # Push model card
+        logger.info("Uploading model card...")
+        api = HfApi()
+        api.upload_file(
+            path_or_fileobj=model_card.encode('utf-8'),
+            path_in_repo="README.md",
+            repo_id=repo_id,
+            token=hf_token,
+            commit_message=f"Add model card for {repo_name}",
+        )
+        logger.info("✓ Model card uploaded")
+        
+        logger.info("="*60)
+        logger.info(f"✅ Successfully pushed to: https://huggingface.co/{repo_id}")
+        logger.info("="*60)
+        
+    except ImportError:
+        logger.warning("huggingface_hub not installed. Install with: pip install huggingface_hub")
+    except Exception as e:
+        logger.error(f"Failed to push to hub: {e}")
+        logger.warning("Training completed successfully, but hub push failed.")
+
+
 def run_all_stages(args: argparse.Namespace):
     """Run all training stages."""
+
+    # Map size to backbone configuration
+    if args.size == 'tiny':
+        vision_backbone = 'repvit'
+        language_backbone = 'tinyllm'
+    else:  # small
+        vision_backbone = 'mobilevit_xs'
+        language_backbone = 'smollm_135m'
+    
+    logger.info(f"Model size: {args.size}")
+    logger.info(f"  Vision backbone: {vision_backbone}")
+    logger.info(f"  Language backbone: {language_backbone}")
 
     # Setup distributed training if enabled
     if args.distributed:
@@ -198,28 +441,39 @@ def run_all_stages(args: argparse.Namespace):
     # Setup
     set_seed(args.seed)
 
-    # Create output directory
-    output_dir = Path(args.output_dir)
+    # Create backbone-specific output directory
+    # This prevents different configurations from overwriting each other
+    base_output_dir = Path(args.output_dir)
+    backbone_suffix = f"{vision_backbone}_{language_backbone}"
+    output_dir = base_output_dir / backbone_suffix
     output_dir.mkdir(parents=True, exist_ok=True)
+    
+    logger.info("="*60)
+    logger.info(f"Output directory: {output_dir}")
+    logger.info(f"Vision backbone: {vision_backbone}")
+    logger.info(f"Language backbone: {language_backbone}")
+    logger.info("="*60)
 
     # Create tokenizer based on language backbone
     logger.info("Creating tokenizer...")
-    tokenizer_model_name = get_tokenizer_model_name(args.language_backbone)
+    tokenizer_model_name = get_tokenizer_model_name(language_backbone)
     logger.info(f"Using tokenizer from: {tokenizer_model_name}")
     tokenizer = create_tokenizer(tokenizer_model_name)
     tokenizer.save_pretrained(output_dir / 'tokenizer')
 
     # Create model config with backbone selection
+    logger.info("="*60)
     logger.info("Creating model config...")
+    logger.info(f"  Vision backbone: {vision_backbone}")
+    logger.info(f"  Language backbone: {language_backbone}")
+    logger.info("="*60)
     config = EmberVLMConfig(
-        vision_backbone=args.vision_backbone,
-        language_backbone=args.language_backbone,
+        vision_backbone=vision_backbone,
+        language_backbone=language_backbone,
     )
 
     # Create model
     logger.info("Creating model...")
-    logger.info(f"Vision backbone: {args.vision_backbone}")
-    logger.info(f"Language backbone: {args.language_backbone}")
     model = create_model(config)
 
     # Resize embeddings for special tokens - MUST happen before any DDP wrapping
@@ -301,8 +555,8 @@ def run_all_stages(args: argparse.Namespace):
         gradient_accumulation_steps=args.gradient_accumulation,
         save_steps=args.save_steps,
         log_steps=args.log_steps,
-        push_to_hub=args.push_to_hub,
-        hub_model_id=args.hub_model_id,
+        push_to_hub=False,  # We handle hub push manually after training
+        hub_model_id=None,
     )
 
     # Carbon tracking - ONLY on rank 0 to prevent duplicate tracking
@@ -606,9 +860,29 @@ def run_all_stages(args: argparse.Namespace):
 
         logger.info(f"Final model saved to {final_output}")
 
-    finally:
-        # Stop carbon tracking (only rank 0 has a tracker)
+        # Stop carbon tracking and get emissions
+        total_emissions = None
         if carbon_tracker is not None:
+            try:
+                total_emissions = carbon_tracker.stop()
+                logger.info(f"Total training emissions: {total_emissions:.4f} kg CO2eq")
+            except Exception as e:
+                logger.warning(f"Error stopping carbon tracker: {e}")
+
+        # Push to HuggingFace Hub (only on rank 0)
+        if rank == 0 and args.hub_username:
+            push_to_hub(
+                model=model,
+                tokenizer=tokenizer,
+                vision_backbone=vision_backbone,
+                language_backbone=language_backbone,
+                hub_username=args.hub_username,
+                carbon_emissions=total_emissions,
+            )
+
+    finally:
+        # Final carbon tracking cleanup (in case push_to_hub wasn't reached)
+        if carbon_tracker is not None and total_emissions is None:
             try:
                 total_emissions = carbon_tracker.stop()
                 logger.info(f"Total training emissions: {total_emissions:.4f} kg CO2eq")
@@ -635,13 +909,10 @@ def main():
                        choices=['all', '1', '2', '3', '4'],
                        help='Training stage to run')
 
-    # Backbone selection
-    parser.add_argument('--vision_backbone', type=str, default='repvit',
-                       choices=['repvit', 'mobilevit_xs'],
-                       help='Vision encoder backbone (default: repvit)')
-    parser.add_argument('--language_backbone', type=str, default='tinyllm',
-                       choices=['tinyllm', 'smollm_135m'],
-                       help='Language model backbone (default: tinyllm)')
+    # Model size selection
+    parser.add_argument('--size', type=str, default='tiny',
+                       choices=['tiny', 'small'],
+                       help='Model size: tiny (~35M params, repvit+tinyllm) or small (~137M params, mobilevit_xs+smollm_135m)')
 
     # Distributed training
     parser.add_argument('--distributed', action='store_true',
@@ -685,11 +956,13 @@ def main():
     parser.add_argument('--stage4_phase2_epochs', type=int, default=5)
     parser.add_argument('--stage4_steps', type=int, default=10000)
 
-    # HuggingFace Hub
-    parser.add_argument('--push_to_hub', action='store_true',
-                       help='Push to HuggingFace Hub')
-    parser.add_argument('--hub_model_id', type=str, default='embervlm',
-                       help='HuggingFace Hub model ID')
+    # HuggingFace Hub (automatic push after training)
+    parser.add_argument('--hub_username', type=str, default=None,
+                       help='HuggingFace username/org for automatic model push. '
+                            'Models push to {username}/embervlm-tiny (--size tiny) or '
+                            '{username}/embervlm-small (--size small). '
+                            'Requires HF_TOKEN environment variable. '
+                            'Set DISABLE_HUB_PUSH=1 to skip pushing.')
 
     # Resume from checkpoint
     parser.add_argument('--resume_from_checkpoint', type=str, default=None,
