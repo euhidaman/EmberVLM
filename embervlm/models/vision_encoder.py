@@ -531,17 +531,12 @@ class MobileViTEncoder(nn.Module):
         else:
             self.adaptive_pool = nn.AdaptiveAvgPool2d((pool_size, pool_size))
 
-        # Projection to output dimension (if backbone_dim != output_dim)
-        if self.backbone_dim != output_dim:
-            self.projection = nn.Sequential(
-                nn.Linear(self.backbone_dim, output_dim),
-                nn.LayerNorm(output_dim),
-            )
-        else:
-            self.projection = nn.Sequential(
-                nn.Linear(self.backbone_dim, output_dim),
-                nn.LayerNorm(output_dim),
-            )
+        # Projection to output dimension
+        # Always create projection layer (even if dims match) for consistent interface
+        self.projection = nn.Sequential(
+            nn.Linear(self.backbone_dim, output_dim),
+            nn.LayerNorm(output_dim),
+        )
 
         # Layer norm for features
         self.ln_vision = nn.LayerNorm(self.backbone_dim)

@@ -321,8 +321,6 @@ def push_to_hub(
     carbon_emissions: float = None,
 ):
     """Push model to HuggingFace Hub with automatic repo selection."""
-    import os
-
     # Check if push is disabled
     if os.environ.get('DISABLE_HUB_PUSH', '').lower() in ('1', 'true', 'yes'):
         logger.info(

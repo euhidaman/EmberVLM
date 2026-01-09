@@ -1172,11 +1172,12 @@ class SmolLMBackbone(nn.Module):
         self.torch_dtype = torch_dtype
 
         # Load pretrained model from HuggingFace
+        # Note: trust_remote_code=False for security - SmolLM doesn't require custom code
         print(f"Loading pretrained SmolLM from {model_name}...")
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
             torch_dtype=torch_dtype,
-            trust_remote_code=True,
+            trust_remote_code=False,
         )
 
         # Get config from loaded model
