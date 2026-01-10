@@ -37,6 +37,32 @@ def main():
 ╚══════════════════════════════════════════════════════════╝
 """)
 
+    # Check if we're on Linux and install system dependencies first
+    if sys.platform.startswith('linux'):
+        print("\n🔧 Step 0: Installing system dependencies (Linux)...")
+        print("   Installing OpenGL libraries for OpenCV...")
+        try:
+            subprocess.run("apt-get update -qq", shell=True, check=False, capture_output=True)
+            result = subprocess.run(
+                "apt-get install -y -qq libgl1-mesa-glx libglib2.0-0",
+                shell=True,
+                check=False,
+                capture_output=True,
+                text=True
+            )
+            if result.returncode == 0:
+                print("   ✅ System dependencies installed")
+            else:
+                print("   ⚠️  Could not auto-install system dependencies")
+                print("   Please run: sudo apt-get install -y libgl1-mesa-glx libglib2.0-0")
+                print("   Then run this script again.")
+                sys.exit(1)
+        except Exception as e:
+            print(f"   ⚠️  Error: {e}")
+            print("   Please run: sudo apt-get install -y libgl1-mesa-glx libglib2.0-0")
+            print("   Then run this script again.")
+            sys.exit(1)
+
     # Check if VLMEvalKit directory exists
     vlmeval_path = Path("../VLMEvalKit")
     if not vlmeval_path.exists():
