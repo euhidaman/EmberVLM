@@ -916,3 +916,324 @@ def compute_effective_batch_size(
     """Compute effective batch size across all processes."""
     return batch_size * gradient_accumulation_steps * world_size
 
+
+def push_checkpoint_to_hub(
+    model: nn.Module,
+    tokenizer: Any,
+    repo_id: str,
+    epoch: int,
+    stage: str,
+    metrics: Dict[str, Any],
+    vision_backbone: str,
+    language_backbone: str,
+    carbon_emissions: Optional[float] = None,
+    overwrite: bool = True,
+    commit_message: Optional[str] = None,
+):
+    """
+    Push model checkpoint to HuggingFace Hub after each epoch.
+    
+    Args:
+        model: The EmberVLM model to push
+        tokenizer: The tokenizer
+        repo_id: HuggingFace repo ID (e.g., "username/embervlm-small")
+        epoch: Current epoch number
+        stage: Training stage (e.g., "stage1", "stage2", etc.)
+        metrics: Dictionary of metrics to include in model card
+        vision_backbone: Vision backbone name
+        language_backbone: Language backbone name
+        carbon_emissions: Total carbon emissions so far (kg CO2eq)
+        overwrite: If True, always push to same repo (default)
+        commit_message: Optional custom commit message
+    """
+    # Check if push is disabled
+    if os.environ.get('DISABLE_HUB_PUSH', '').lower() in ('1', 'true', 'yes'):
+        logger.info("Hub push disabled via DISABLE_HUB_PUSH environment variable")
+        return
+    
+    # Check for HF token
+    hf_token = os.environ.get('HF_TOKEN')
+    if not hf_token:
+        logger.warning("HF_TOKEN not found. Skipping hub push.")
+        logger.warning("To enable: export HF_TOKEN=your_token")
+        return
+    
+    try:
+        from huggingface_hub import HfApi, create_repo
+        from datetime import datetime
+        
+        # Unwrap DDP if needed
+        model_to_save = unwrap_model(model)
+        
+        # Count parameters
+        total_params = sum(p.numel() for p in model_to_save.parameters())
+        trainable_params = sum(p.numel() for p in model_to_save.parameters() if p.requires_grad)
+        
+        # Determine model size
+        if total_params < 100_000_000:
+            size_category = "Tiny (~35M parameters)"
+        else:
+            size_category = "Small (~137M parameters)"
+        
+        # Create commit message
+        if commit_message is None:
+            commit_message = f"Update model - {stage.upper()} Epoch {epoch}"
+            if 'loss' in metrics:
+                commit_message += f" | Loss: {metrics['loss']:.4f}"
+            if 'accuracy' in metrics:
+                commit_message += f" | Acc: {metrics['accuracy']:.2%}"
+        
+        logger.info("="*60)
+        logger.info(f"Pushing to HuggingFace Hub: {repo_id}")
+        logger.info(f"  Stage: {stage} | Epoch: {epoch}")
+        logger.info(f"  Commit: {commit_message}")
+        logger.info("="*60)
+        
+        # Create repo if it doesn't exist
+        api = HfApi(token=hf_token)
+        try:
+            create_repo(repo_id, token=hf_token, exist_ok=True, private=False)
+            logger.info(f"✓ Repository ready: https://huggingface.co/{repo_id}")
+        except Exception as e:
+            logger.warning(f"Repo creation note: {e}")
+        
+        # Generate comprehensive model card
+        model_card = _generate_model_card(
+            vision_backbone=vision_backbone,
+            language_backbone=language_backbone,
+            total_params=total_params,
+            trainable_params=trainable_params,
+            size_category=size_category,
+            stage=stage,
+            epoch=epoch,
+            metrics=metrics,
+            carbon_emissions=carbon_emissions,
+            repo_id=repo_id,
+        )
+        
+        # Create temporary directory for upload
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            
+            # Save model
+            logger.info("Saving model...")
+            model_to_save.save_pretrained(str(tmp_path))
+            
+            # Save tokenizer
+            logger.info("Saving tokenizer...")
+            tokenizer.save_pretrained(str(tmp_path))
+            
+            # Save model card
+            logger.info("Saving model card...")
+            with open(tmp_path / "README.md", "w", encoding="utf-8") as f:
+                f.write(model_card)
+            
+            # Save training metadata
+            training_info = {
+                "stage": stage,
+                "epoch": epoch,
+                "metrics": {k: float(v) if isinstance(v, (int, float)) else str(v) for k, v in metrics.items()},
+                "carbon_emissions_kg": carbon_emissions,
+                "timestamp": datetime.now().isoformat(),
+                "vision_backbone": vision_backbone,
+                "language_backbone": language_backbone,
+                "total_parameters": total_params,
+                "trainable_parameters": trainable_params,
+            }
+            with open(tmp_path / "training_info.json", "w") as f:
+                json.dump(training_info, f, indent=2)
+            
+            # Upload to hub
+            logger.info("Uploading to HuggingFace Hub...")
+            api.upload_folder(
+                folder_path=str(tmp_path),
+                repo_id=repo_id,
+                repo_type="model",
+                commit_message=commit_message,
+                token=hf_token,
+            )
+            
+        logger.info(f"✅ Successfully pushed to https://huggingface.co/{repo_id}")
+        
+    except ImportError:
+        logger.error("huggingface_hub not installed. Run: pip install huggingface_hub")
+    except Exception as e:
+        logger.error(f"Failed to push to hub: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+
+
+def _generate_model_card(
+    vision_backbone: str,
+    language_backbone: str,
+    total_params: int,
+    trainable_params: int,
+    size_category: str,
+    stage: str,
+    epoch: int,
+    metrics: Dict[str, Any],
+    carbon_emissions: Optional[float],
+    repo_id: str,
+) -> str:
+    """Generate comprehensive model card for HuggingFace Hub."""
+    from datetime import datetime
+    
+    # Backbone descriptions
+    vision_desc = {
+        'repvit': 'RepViT-M0.9 (~5M params)',
+        'mobilevit_xs': 'Apple MobileViT-XS (~2.3M params)'
+    }.get(vision_backbone, vision_backbone)
+    
+    language_desc = {
+        'tinyllm': 'TinyLLM-30M (30M params)',
+        'smollm_135m': 'SmolLM-135M (135M params)'
+    }.get(language_backbone, language_backbone)
+    
+    # Format metrics
+    metrics_text = "\n".join([f"- **{k}**: {v:.4f}" if isinstance(v, float) else f"- **{k}**: {v}" 
+                              for k, v in sorted(metrics.items())])
+    
+    carbon_text = f"\n- **Carbon Emissions (so far)**: {carbon_emissions:.4f} kg CO2eq" if carbon_emissions else ""
+    
+    # Stage descriptions
+    stage_desc = {
+        'stage1': 'Visual-Language Alignment - Learning to ground vision and language',
+        'stage2': 'Multimodal Instruction Tuning - Following complex instructions',
+        'stage3': 'Robot Fleet Selection - Choosing optimal robots for tasks',
+        'stage4': 'Chain-of-Thought Reasoning - Generating reasoning chains',
+    }.get(stage, stage)
+    
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
+    
+    card = f"""---
+language:
+- en
+license: apache-2.0
+tags:
+- vision-language
+- multimodal
+- robotics
+- edge-deployment
+- tiny-vlm
+- {vision_backbone}
+- {language_backbone}
+- {stage}
+base_model:
+- {language_backbone}
+library_name: transformers
+pipeline_tag: image-text-to-text
+---
+
+# EmberVLM: {size_category}
+
+**🔥 Efficient Vision-Language Model for Edge Deployment & Robotic Applications**
+
+This model is currently in training - **{stage.upper()} (Epoch {epoch})**.
+
+## 📊 Current Training Status
+
+- **Stage**: {stage_desc}
+- **Epoch**: {epoch}
+- **Last Updated**: {timestamp}
+
+### Latest Metrics
+{metrics_text}{carbon_text}
+
+## 🏗️ Model Architecture
+
+- **Size**: {size_category}
+- **Total Parameters**: {total_params:,}
+- **Trainable Parameters**: {trainable_params:,} ({100*trainable_params/total_params:.1f}%)
+- **Vision Encoder**: {vision_desc}
+- **Language Model**: {language_desc}
+
+## 🎯 Training Curriculum
+
+EmberVLM follows a 4-stage training curriculum:
+
+1. ✅ **Stage 1: Visual-Language Alignment** - Grounding vision and language
+2. ✅ **Stage 2: Multimodal Instruction Tuning** - Following instructions
+3. ✅ **Stage 3: Robot Fleet Selection** - Task-robot matching
+4. ⏳ **Stage 4: Chain-of-Thought Reasoning** - Reasoning generation
+
+**Current Stage**: {stage.upper()}
+
+## 💻 Usage
+
+```python
+from transformers import AutoTokenizer
+from embervlm import EmberVLM
+from PIL import Image
+
+# Load model and tokenizer
+model = EmberVLM.from_pretrained("{repo_id}")
+tokenizer = AutoTokenizer.from_pretrained("{repo_id}")
+
+# Load image
+image = Image.open("scene.jpg")
+
+# Generate response
+prompt = "<image>Describe what you see and select the best robot for this task."
+outputs = model.generate(
+    image=image,
+    prompt=prompt,
+    tokenizer=tokenizer,
+    max_new_tokens=256
+)
+
+print(outputs)
+```
+
+## 🎓 Training Details
+
+- **Vision Backbone**: {vision_backbone}
+- **Language Backbone**: {language_backbone}
+- **Optimization**: AdamW with cosine learning rate schedule
+- **Mixed Precision**: bfloat16
+- **Distributed Training**: Multi-GPU with DDP
+- **Class Balancing**: Focal loss for robot selection (Stage 3)
+- **Reasoning**: Chain-of-thought with reinforcement learning (Stage 4)
+
+## 🌍 Environmental Impact
+
+This model is designed for edge deployment to minimize energy consumption.{carbon_text}
+
+## 🎯 Intended Use
+
+- **Primary**: Edge deployment on resource-constrained devices
+- **Applications**: 
+  - Robotic vision-language understanding
+  - Real-time multimodal reasoning
+  - Robot fleet selection and task planning
+  - Mobile/embedded AI systems
+
+## ⚠️ Limitations
+
+- Model is still in training - performance will improve as training progresses
+- Optimized for efficiency over maximum accuracy
+- Best suited for edge/mobile deployment scenarios
+- Training focused on robot-centric scenarios
+
+## 📚 Citation
+
+```bibtex
+@software{{embervlm_2026,
+  title = {{EmberVLM: Efficient Vision-Language Model for Edge Deployment}},
+  author = {{EmberVLM Team}},
+  year = {{2026}},
+  url = {{https://huggingface.co/{repo_id}}}
+}}
+```
+
+## 📝 License
+
+Apache 2.0
+
+---
+
+**Note**: This is a checkpoint from {stage} training (epoch {epoch}). 
+The model will be updated after each epoch with improved performance.
+"""
+    
+    return card

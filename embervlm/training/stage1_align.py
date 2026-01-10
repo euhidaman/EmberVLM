@@ -36,6 +36,7 @@ from embervlm.training.train_utils import (
     load_checkpoint,
     MetricTracker,
     print_trainable_parameters,
+    push_checkpoint_to_hub,
 )
 from embervlm.data.loaders import get_alignment_dataloader
 from embervlm.monitoring.wandb_logger import EnhancedWandbLogger
@@ -122,9 +123,15 @@ class Stage1Trainer:
         train_dataloader: DataLoader,
         val_dataloader: Optional[DataLoader] = None,
         tokenizer: Any = None,
+        hub_repo_id: Optional[str] = None,
+        vision_backbone: str = "repvit",
+        language_backbone: str = "tinyllm",
     ):
         self.config = config
         self.tokenizer = tokenizer
+        self.hub_repo_id = hub_repo_id
+        self.vision_backbone = vision_backbone
+        self.language_backbone = language_backbone
 
         # Setup distributed
         self.rank, self.local_rank, self.world_size = setup_distributed()
@@ -602,6 +609,33 @@ class Stage1Trainer:
                 # Save at end of epoch
                 self.save_checkpoint()
 
+                # Push to HuggingFace Hub after each epoch
+                if is_main_process() and self.hub_repo_id:
+                    try:
+                        metrics = {
+                            'loss': self.metric_tracker.get_average().get('loss', 0.0),
+                            'contrastive_loss': self.metric_tracker.get_average().get('contrastive_loss', 0.0),
+                            'captioning_loss': self.metric_tracker.get_average().get('captioning_loss', 0.0),
+                        }
+                        
+                        carbon_emissions = None
+                        if self.carbon_tracker is not None:
+                            carbon_emissions = self.carbon_tracker.get_emissions()
+                        
+                        push_checkpoint_to_hub(
+                            model=self.model,
+                            tokenizer=self.tokenizer,
+                            repo_id=self.hub_repo_id,
+                            epoch=epoch + 1,
+                            stage="stage1",
+                            metrics=metrics,
+                            vision_backbone=self.vision_backbone,
+                            language_backbone=self.language_backbone,
+                            carbon_emissions=carbon_emissions,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to push to HuggingFace Hub: {e}")
+
                 barrier()
 
         except Exception as e:
@@ -638,6 +672,9 @@ def run_stage1_training(
     data_dir: str,
     tokenizer: Any,
     num_epochs: int = 3,
+    hub_repo_id: Optional[str] = None,
+    vision_backbone: str = "repvit",
+    language_backbone: str = "tinyllm",
 ):
     """
     Run Stage 1 training.
@@ -648,6 +685,9 @@ def run_stage1_training(
         data_dir: Directory with training data
         tokenizer: Tokenizer
         num_epochs: Number of training epochs
+        hub_repo_id: HuggingFace Hub repo ID for epoch-level pushes
+        vision_backbone: Vision backbone name
+        language_backbone: Language backbone name
     """
     # Create data loaders
     train_dataloader = get_alignment_dataloader(
@@ -668,6 +708,9 @@ def run_stage1_training(
 
     # Create trainer
     trainer = Stage1Trainer(
+        hub_repo_id=hub_repo_id,
+        vision_backbone=vision_backbone,
+        language_backbone=language_backbone,
         model=model,
         config=config,
         train_dataloader=train_dataloader,

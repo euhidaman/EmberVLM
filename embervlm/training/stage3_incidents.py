@@ -34,6 +34,7 @@ from embervlm.training.train_utils import (
     save_checkpoint,
     MetricTracker,
     print_trainable_parameters,
+    push_checkpoint_to_hub,
 )
 from embervlm.data.robot_loader import get_robot_selection_dataloader
 from embervlm.training.robot_metrics import RobotSelectionMetrics, ReasoningQualityMetrics
@@ -61,9 +62,15 @@ class Stage3Trainer:
         robot_dataloader: DataLoader,
         val_dataloader: Optional[DataLoader] = None,
         tokenizer: Any = None,
+        hub_repo_id: Optional[str] = None,
+        vision_backbone: str = "repvit",
+        language_backbone: str = "tinyllm",
     ):
         self.config = config
         self.tokenizer = tokenizer
+        self.hub_repo_id = hub_repo_id
+        self.vision_backbone = vision_backbone
+        self.language_backbone = language_backbone
 
         # Setup distributed
         self.rank, self.local_rank, self.world_size = setup_distributed()
@@ -265,7 +272,11 @@ class Stage3Trainer:
         try:
             # Count samples per class
             class_counts = torch.zeros(5, dtype=torch.float32)
+            
+            # Robot names for logging
+            robot_names = ["Drone", "Underwater Robot", "Humanoid", "Robot with Wheels", "Robot with Legs"]
 
+            # Iterate through all batches to get full distribution
             for batch in self.robot_dataloader:
                 targets = batch.get('robot_target')
                 if targets is not None:
@@ -278,9 +289,21 @@ class Stage3Trainer:
                 self.reasoning_loss.set_class_weights(class_counts)
 
                 if is_main_process():
-                    logger.info(f"Class distribution: {class_counts.tolist()}")
+                    logger.info("="*60)
+                    logger.info("Class Distribution in Training Data:")
+                    for i, (name, count) in enumerate(zip(robot_names, class_counts)):
+                        pct = (count / class_counts.sum() * 100).item()
+                        logger.info(f"  {name}: {int(count)} samples ({pct:.1f}%)")
+                    
                     if hasattr(self.reasoning_loss.robot_criterion, 'alpha'):
-                        logger.info(f"Class weights: {self.reasoning_loss.robot_criterion.alpha.tolist()}")
+                        logger.info("\nComputed Class Weights (inverse frequency):")
+                        weights = self.reasoning_loss.robot_criterion.alpha
+                        for i, (name, weight) in enumerate(zip(robot_names, weights)):
+                            logger.info(f"  {name}: {weight:.3f}")
+                    logger.info("="*60)
+            else:
+                logger.warning("⚠️  No samples found for class weight computation")
+                
         except Exception as e:
             logger.warning(f"Could not compute class weights: {e}")
 
@@ -765,7 +788,41 @@ class Stage3Trainer:
 
                 # Evaluate after each epoch
                 if self.val_dataloader is not None:
-                    self.evaluate()
+                    val_metrics = self.evaluate()
+                else:
+                    val_metrics = {}
+
+                # Push to HuggingFace Hub after each epoch
+                if is_main_process() and self.hub_repo_id:
+                    try:
+                        metrics = {
+                            'loss': self.metric_tracker.get_average().get('loss', 0.0),
+                            'accuracy': val_metrics.get('accuracy', 0.0),
+                            'Drone_f1': val_metrics.get('Drone_f1', 0.0),
+                            'Underwater_Robot_f1': val_metrics.get('Underwater Robot_f1', 0.0),
+                            'Humanoid_f1': val_metrics.get('Humanoid_f1', 0.0),
+                            'Robot_with_Wheels_f1': val_metrics.get('Robot with Wheels_f1', 0.0),
+                            'Robot_with_Legs_f1': val_metrics.get('Robot with Legs_f1', 0.0),
+                            'macro_f1': val_metrics.get('macro_f1', 0.0),
+                        }
+                        
+                        carbon_emissions = None
+                        if self.carbon_tracker is not None:
+                            carbon_emissions = self.carbon_tracker.get_emissions()
+                        
+                        push_checkpoint_to_hub(
+                            model=self.model,
+                            tokenizer=self.tokenizer,
+                            repo_id=self.hub_repo_id,
+                            epoch=epoch + 1,
+                            stage="stage3",
+                            metrics=metrics,
+                            vision_backbone=self.vision_backbone,
+                            language_backbone=self.language_backbone,
+                            carbon_emissions=carbon_emissions,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to push to HuggingFace Hub: {e}")
 
                 barrier()
 
@@ -792,8 +849,11 @@ def run_stage3_training(
     robot_data_dir: str,
     tokenizer: Any,
     robot_epochs: int = 20,
+    hub_repo_id: Optional[str] = None,
+    vision_backbone: str = "repvit",
+    language_backbone: str = "tinyllm",
 ):
-    """Run Stage 3 robot selection training."""
+    """Run Stage 3 robot selection training with HuggingFace Hub push support."""
     robot_dataloader = get_robot_selection_dataloader(
         data_dir=robot_data_dir,
         tokenizer=tokenizer,
@@ -816,6 +876,9 @@ def run_stage3_training(
         robot_dataloader=robot_dataloader,
         val_dataloader=val_dataloader,
         tokenizer=tokenizer,
+        hub_repo_id=hub_repo_id,
+        vision_backbone=vision_backbone,
+        language_backbone=language_backbone,
     )
 
     trainer.train(robot_epochs)

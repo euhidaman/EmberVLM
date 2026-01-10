@@ -34,6 +34,7 @@ from embervlm.training.train_utils import (
     save_checkpoint,
     MetricTracker,
     print_trainable_parameters,
+    push_checkpoint_to_hub,
 )
 from embervlm.data.loaders import get_instruction_dataloader
 from embervlm.monitoring.wandb_logger import EnhancedWandbLogger
@@ -141,10 +142,16 @@ class Stage2Trainer:
         tokenizer: Any = None,
         teacher_model: Optional[nn.Module] = None,
         distillation_config: Optional[Dict[str, Any]] = None,
+        hub_repo_id: Optional[str] = None,
+        vision_backbone: str = "repvit",
+        language_backbone: str = "tinyllm",
     ):
         self.config = config
         self.tokenizer = tokenizer
         self.teacher_model = teacher_model
+        self.hub_repo_id = hub_repo_id
+        self.vision_backbone = vision_backbone
+        self.language_backbone = language_backbone
 
         # Setup distributed
         self.rank, self.local_rank, self.world_size = setup_distributed()
@@ -661,6 +668,33 @@ class Stage2Trainer:
                     self.evaluate()
 
                 self.save_checkpoint()
+                
+                # Push to HuggingFace Hub after each epoch
+                if is_main_process() and self.hub_repo_id:
+                    try:
+                        metrics = {
+                            'loss': self.metric_tracker.get_average().get('loss', 0.0),
+                            'instruction_loss': self.metric_tracker.get_average().get('instruction_loss', 0.0),
+                        }
+                        
+                        carbon_emissions = None
+                        if self.carbon_tracker is not None:
+                            carbon_emissions = self.carbon_tracker.get_emissions()
+                        
+                        push_checkpoint_to_hub(
+                            model=self.model,
+                            tokenizer=self.tokenizer,
+                            repo_id=self.hub_repo_id,
+                            epoch=epoch + 1,
+                            stage="stage2",
+                            metrics=metrics,
+                            vision_backbone=self.vision_backbone,
+                            language_backbone=self.language_backbone,
+                            carbon_emissions=carbon_emissions,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to push to HuggingFace Hub: {e}")
+                
                 barrier()
 
         except Exception as e:
@@ -698,8 +732,11 @@ def run_stage2_training(
     tokenizer: Any,
     num_epochs: int = 5,
     teacher_model: Optional[nn.Module] = None,
+    hub_repo_id: Optional[str] = None,
+    vision_backbone: str = "repvit",
+    language_backbone: str = "tinyllm",
 ):
-    """Run Stage 2 training."""
+    """Run Stage 2 training with HuggingFace Hub push support."""
     train_dataloader = get_instruction_dataloader(
         data_dir=data_dir,
         tokenizer=tokenizer,

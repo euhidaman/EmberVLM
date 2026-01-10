@@ -39,6 +39,7 @@ from embervlm.training.train_utils import (
     save_checkpoint,
     MetricTracker,
     print_trainable_parameters,
+    push_checkpoint_to_hub,
 )
 from embervlm.data.loaders import get_reasoning_dataloader
 from embervlm.monitoring.wandb_logger import WandbLogger
@@ -174,9 +175,15 @@ class Stage4Trainer:
         train_dataloader: DataLoader,
         val_dataloader: Optional[DataLoader] = None,
         tokenizer: Any = None,
+        hub_repo_id: Optional[str] = None,
+        vision_backbone: str = "repvit",
+        language_backbone: str = "tinyllm",
     ):
         self.config = config
         self.tokenizer = tokenizer
+        self.hub_repo_id = hub_repo_id
+        self.vision_backbone = vision_backbone
+        self.language_backbone = language_backbone
 
         # Setup distributed
         self.rank, self.local_rank, self.world_size = setup_distributed()
@@ -731,7 +738,36 @@ class Stage4Trainer:
                     self.train_dataloader.sampler.set_epoch(epoch)
 
                 self.train_epoch(epoch)
-                self.evaluate()
+                val_metrics = self.evaluate()
+                
+                # Push to HuggingFace Hub after each epoch in Phase 1
+                if is_main_process() and self.hub_repo_id:
+                    try:
+                        metrics = {
+                            'loss': self.metric_tracker.get_average().get('loss', 0.0),
+                            'reasoning_loss': self.metric_tracker.get_average().get('reasoning_loss', 0.0),
+                            'robot_accuracy': val_metrics.get('robot_accuracy', 0.0),
+                            'phase': 'phase1',
+                        }
+                        
+                        carbon_emissions = None
+                        if self.carbon_tracker is not None:
+                            carbon_emissions = self.carbon_tracker.get_emissions()
+                        
+                        push_checkpoint_to_hub(
+                            model=self.model,
+                            tokenizer=self.tokenizer,
+                            repo_id=self.hub_repo_id,
+                            epoch=epoch + 1,
+                            stage="stage4_phase1",
+                            metrics=metrics,
+                            vision_backbone=self.vision_backbone,
+                            language_backbone=self.language_backbone,
+                            carbon_emissions=carbon_emissions,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to push to HuggingFace Hub: {e}")
+                
                 barrier()
 
             # Phase 2: Joint fine-tuning
@@ -746,7 +782,36 @@ class Stage4Trainer:
                     self.train_dataloader.sampler.set_epoch(phase1_epochs + epoch)
 
                 self.train_epoch(epoch)
-                self.evaluate()
+                val_metrics = self.evaluate()
+                
+                # Push to HuggingFace Hub after each epoch in Phase 2
+                if is_main_process() and self.hub_repo_id:
+                    try:
+                        metrics = {
+                            'loss': self.metric_tracker.get_average().get('loss', 0.0),
+                            'reasoning_loss': self.metric_tracker.get_average().get('reasoning_loss', 0.0),
+                            'robot_accuracy': val_metrics.get('robot_accuracy', 0.0),
+                            'phase': 'phase2',
+                        }
+                        
+                        carbon_emissions = None
+                        if self.carbon_tracker is not None:
+                            carbon_emissions = self.carbon_tracker.get_emissions()
+                        
+                        push_checkpoint_to_hub(
+                            model=self.model,
+                            tokenizer=self.tokenizer,
+                            repo_id=self.hub_repo_id,
+                            epoch=phase1_epochs + epoch + 1,
+                            stage="stage4_phase2",
+                            metrics=metrics,
+                            vision_backbone=self.vision_backbone,
+                            language_backbone=self.language_backbone,
+                            carbon_emissions=carbon_emissions,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to push to HuggingFace Hub: {e}")
+                
                 barrier()
 
             # Final checkpoint
@@ -775,8 +840,11 @@ def run_stage4_training(
     phase2_epochs: int = 5,
     phase1_lr: float = 1e-4,
     phase2_lr: float = 5e-5,
+    hub_repo_id: Optional[str] = None,
+    vision_backbone: str = "repvit",
+    language_backbone: str = "tinyllm",
 ):
-    """Run Stage 4 training."""
+    """Run Stage 4 training with HuggingFace Hub push support."""
     train_dataloader = get_reasoning_dataloader(
         data_dir=data_dir,
         tokenizer=tokenizer,
@@ -799,6 +867,9 @@ def run_stage4_training(
         train_dataloader=train_dataloader,
         val_dataloader=val_dataloader,
         tokenizer=tokenizer,
+        hub_repo_id=hub_repo_id,
+        vision_backbone=vision_backbone,
+        language_backbone=language_backbone,
     )
 
     trainer.train(

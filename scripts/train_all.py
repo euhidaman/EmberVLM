@@ -620,12 +620,21 @@ def run_all_stages(args: argparse.Namespace):
             stage1_data_path = Path(
                 args.stage1_data) if args.stage1_data else None
             if stage1_data_path and stage1_data_path.exists():
+                # Prepare HF Hub repo ID
+                hub_repo_id = None
+                if args.hub_username:
+                    repo_name = "embervlm-tiny" if args.size == 'tiny' else "embervlm-small"
+                    hub_repo_id = f"{args.hub_username}/{repo_name}"
+                
                 run_stage1_training(
                     model=model,
                     config=stage1_config,
                     data_dir=str(stage1_data_path),
                     tokenizer=tokenizer,
                     num_epochs=args.stage1_epochs,
+                    hub_repo_id=hub_repo_id,
+                    vision_backbone=vision_backbone,
+                    language_backbone=language_backbone,
                 )
                 # Unwrap model from DDP if needed
                 from embervlm.training.train_utils import unwrap_model
@@ -658,12 +667,21 @@ def run_all_stages(args: argparse.Namespace):
             stage2_data_path = Path(
                 args.stage2_data) if args.stage2_data else None
             if stage2_data_path and stage2_data_path.exists():
+                # Prepare HF Hub repo ID
+                hub_repo_id = None
+                if args.hub_username:
+                    repo_name = "embervlm-tiny" if args.size == 'tiny' else "embervlm-small"
+                    hub_repo_id = f"{args.hub_username}/{repo_name}"
+                
                 run_stage2_training(
                     model=model,
                     config=stage2_config,
                     data_dir=str(stage2_data_path),
                     tokenizer=tokenizer,
                     num_epochs=args.stage2_epochs,
+                    hub_repo_id=hub_repo_id,
+                    vision_backbone=vision_backbone,
+                    language_backbone=language_backbone,
                 )
                 # Unwrap model from DDP if needed
                 from embervlm.training.train_utils import unwrap_model
@@ -817,12 +835,21 @@ def run_all_stages(args: argparse.Namespace):
                 create_robot_selection_dataset(str(robot_dir))
 
             if robot_dir.exists():
+                # Prepare HF Hub repo ID
+                hub_repo_id = None
+                if args.hub_username:
+                    repo_name = "embervlm-tiny" if args.size == 'tiny' else "embervlm-small"
+                    hub_repo_id = f"{args.hub_username}/{repo_name}"
+                
                 run_stage3_training(
                     model=model,
                     config=stage3_config,
                     robot_data_dir=str(robot_dir),
                     tokenizer=tokenizer,
                     robot_epochs=args.stage3_robot_epochs,
+                    hub_repo_id=hub_repo_id,
+                    vision_backbone=vision_backbone,
+                    language_backbone=language_backbone,
                 )
                 # Unwrap model from DDP if needed
                 from embervlm.training.train_utils import unwrap_model
@@ -878,6 +905,12 @@ def run_all_stages(args: argparse.Namespace):
             if data_dir_to_use is not None:
                 logger.info(f"Stage 4 data source: {data_source_type}")
                 logger.info(f"Stage 4 data directory: {data_dir_to_use}")
+                # Prepare HF Hub repo ID
+                hub_repo_id = None
+                if args.hub_username:
+                    repo_name = "embervlm-tiny" if args.size == 'tiny' else "embervlm-small"
+                    hub_repo_id = f"{args.hub_username}/{repo_name}"
+                
                 run_stage4_training(
                     model=model,
                     config=stage4_config,
@@ -885,6 +918,9 @@ def run_all_stages(args: argparse.Namespace):
                     tokenizer=tokenizer,
                     phase1_epochs=args.stage4_phase1_epochs,
                     phase2_epochs=args.stage4_phase2_epochs,
+                    hub_repo_id=hub_repo_id,
+                    vision_backbone=vision_backbone,
+                    language_backbone=language_backbone,
                 )
                 # Unwrap model from DDP if needed
                 from embervlm.training.train_utils import unwrap_model
