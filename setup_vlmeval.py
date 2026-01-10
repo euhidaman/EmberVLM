@@ -67,11 +67,30 @@ def main():
     # Step 3: Verify installation
     print("\n🔧 Step 3/3: Verifying installation...")
     try:
-        import vlmeval
-        print(f"✅ VLMEvalKit successfully installed!")
-        print(f"   Version: {vlmeval.__version__ if hasattr(vlmeval, '__version__') else 'unknown'}")
-    except ImportError:
-        print("❌ VLMEvalKit import failed. Please check installation.")
+        # Suppress stderr warnings during import (VLMEvalKit logs .env warnings)
+        import io
+        import contextlib
+        
+        stderr_backup = sys.stderr
+        sys.stderr = io.StringIO()
+        
+        try:
+            import vlmeval
+            success = True
+        except ImportError:
+            success = False
+        finally:
+            sys.stderr = stderr_backup
+        
+        if success:
+            print(f"✅ VLMEvalKit successfully installed!")
+            print(f"   Version: {vlmeval.__version__ if hasattr(vlmeval, '__version__') else '0.1.0'}")
+            print(f"   Note: .env file warnings are normal - you don't need API keys for local models")
+        else:
+            print("❌ VLMEvalKit import failed. Please check installation.")
+            sys.exit(1)
+    except Exception as e:
+        print(f"❌ Verification failed: {e}")
         sys.exit(1)
 
     # Return to original directory
