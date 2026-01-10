@@ -77,8 +77,13 @@ def main():
         try:
             import vlmeval
             success = True
-        except ImportError:
+            error_msg = None
+        except ImportError as e:
             success = False
+            error_msg = str(e)
+        except Exception as e:
+            success = False
+            error_msg = str(e)
         finally:
             sys.stderr = stderr_backup
         
@@ -87,10 +92,14 @@ def main():
             print(f"   Version: {vlmeval.__version__ if hasattr(vlmeval, '__version__') else '0.1.0'}")
             print(f"   Note: .env file warnings are normal - you don't need API keys for local models")
         else:
-            print("❌ VLMEvalKit import failed. Please check installation.")
+            print(f"❌ VLMEvalKit import failed: {error_msg}")
+            print("\nTrying to import with full error output...")
+            import vlmeval  # This will show the full error
             sys.exit(1)
     except Exception as e:
         print(f"❌ Verification failed: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
     # Return to original directory
