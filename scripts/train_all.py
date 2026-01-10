@@ -1048,7 +1048,7 @@ def main():
     parser.add_argument('--stage4_steps', type=int, default=10000)
 
     # HuggingFace Hub (automatic push after training)
-    parser.add_argument('--hub_username', type=str, default=None,
+    parser.add_argument('--hub_username', type=str, default='euhidaman',
                         help='HuggingFace username/org for automatic model push. '
                         'Models push to {username}/embervlm-tiny (--size tiny) or '
                         '{username}/embervlm-small (--size small). '
