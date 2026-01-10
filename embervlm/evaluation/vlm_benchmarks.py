@@ -77,29 +77,31 @@ def compute_quality_score(results: Dict[str, float]) -> float:
     
     for benchmark, weight in weights.items():
         if benchmark in results:
-            weighted_score = results[benchmark] * weight
+            weighted_score += results[benchmark] * weight
+            total_weight += weight
             logger.info(f"  {benchmark:20s}: {results[benchmark]:6.2f}% (weight: {weight:.2f})")
-            total_score += results[benchmark] * weight
     
-    return total_score
+    if total_weight > 0:
+        return weighted_score / total_weight
+    return 0.0
 
 
 class EmberVLMEvalAdapter:
     """Adapter to make EmberVLM compatible with VLMEvalKit."""
     
-    def __init__(self, model_path: str, tokenizer):
+    def __init__(self, model_path: str, tokenizer, device: str = 'cuda'):
         """Initialize adapter with EmberVLM model."""
-        from embervlm.models import EmberVLM
-        from embervlm.training.train_utils import load_checkpoint
+        from embervlm.models import EmberVLM, EmberVLMConfig
         
         logger.info(f"Loading EmberVLM from {model_path}")
         
         # Load checkpoint
-        checkpoint = torch.load(model_path / 'pytorch_model.bin', map_location='cpu')
+        checkpoint = torch.load(Path(model_path) / 'pytorch_model.bin', map_location='cpu')
         
-        # Create model
+        # Create config and model
+        config = EmberVLMConfig.from_pretrained(model_path)
         self.model = EmberVLM(config)
-        self.model.load_state_dict(checkpoint['model'])
+        self.model.load_state_dict(checkpoint['model_state_dict'])
         self.model = self.model.to(device).eval()
         
         self.tokenizer = tokenizer
@@ -140,10 +142,3 @@ class EmberVLMEvalAdapter:
         )
         
         return response
-    ```
-
-Now I'll implement the complete VLM benchmarking integration. Let me create all necessary files:
-
-<function_calls>
-<invoke name="manage_todo_list">
-<parameter name="operation">write

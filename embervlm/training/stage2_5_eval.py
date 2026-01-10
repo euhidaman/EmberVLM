@@ -166,6 +166,20 @@ def log_results_to_wandb(results: Dict[str, float], results_summary: Dict):
         logger.warning(f"Failed to log results to WandB: {e}")
         import traceback
         traceback.print_exc()
+
+
+# Benchmark presets
+BENCHMARK_PRESETS = {
+    'quick': {
+        'benchmarks': [
+            'MMBench_DEV_EN_V11',  # General multimodal understanding
+            'TextVQA_VAL',          # OCR + VQA
+            'ScienceQA_IMG',        # Reasoning
+        ],
+        'description': 'Quick validation (3 benchmarks, ~30 minutes)',
+        'expected_minutes': 30,
+    },
+    'standard': {
         'benchmarks': [
             'MMBench_DEV_EN_V11',  # General multimodal understanding
             'TextVQA_VAL',          # OCR + VQA
