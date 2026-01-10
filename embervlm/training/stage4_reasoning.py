@@ -314,13 +314,30 @@ class Stage4Trainer:
         """Unfreeze all trainable parameters."""
         model = unwrap_model(self.model)
 
-        # Unfreeze last layer of language model
-        for param in model.language_model.model.transformer.h[-1].parameters():
-            param.requires_grad = True
-        for param in model.language_model.model.transformer.ln_f.parameters():
-            param.requires_grad = True
-        for param in model.language_model.model.lm_head.parameters():
-            param.requires_grad = True
+        # Unfreeze last layer of language model - handle both GPT-2 and Llama structures
+        lm_model = model.language_model.model if hasattr(model.language_model, 'model') else model.language_model
+        
+        # Try GPT-2 style (TinyLLM) first
+        if hasattr(lm_model, 'transformer') and hasattr(lm_model.transformer, 'h'):
+            for param in lm_model.transformer.h[-1].parameters():
+                param.requires_grad = True
+            for param in lm_model.transformer.ln_f.parameters():
+                param.requires_grad = True
+        # Try Llama style (SmolLM)
+        elif hasattr(lm_model, 'layers'):
+            for param in lm_model.layers[-1].parameters():
+                param.requires_grad = True
+            if hasattr(lm_model, 'norm'):
+                for param in lm_model.norm.parameters():
+                    param.requires_grad = True
+        
+        # Unfreeze LM head
+        if hasattr(model.language_model, 'lm_head'):
+            for param in model.language_model.lm_head.parameters():
+                param.requires_grad = True
+        elif hasattr(lm_model, 'lm_head'):
+            for param in lm_model.lm_head.parameters():
+                param.requires_grad = True
 
         # Unfreeze fusion module
         for param in model.fusion_module.parameters():
