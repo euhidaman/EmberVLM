@@ -41,6 +41,8 @@ from embervlm.training.train_utils import (
 from embervlm.data.loaders import get_alignment_dataloader
 from embervlm.monitoring.wandb_logger import EnhancedWandbLogger
 from embervlm.monitoring.carbon_tracker import CarbonTracker
+from embervlm.training.contrastive_metrics import compute_enhanced_contrastive_metrics
+from embervlm.training.early_stopping import EarlyStopping, BestCheckpointTracker, log_stage_summary
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +134,20 @@ class Stage1Trainer:
         self.hub_repo_id = hub_repo_id
         self.vision_backbone = vision_backbone
         self.language_backbone = language_backbone
+
+        # Early stopping: monitor average of top-5 retrieval accuracies
+        self.early_stopping = EarlyStopping(
+            patience=3,
+            mode='max',
+            min_delta=0.001,
+            verbose=True
+        )
+        self.best_checkpoint_tracker = BestCheckpointTracker(
+            save_dir=config.output_dir,
+            metric_name='avg_retrieval_top5',
+            mode='max'
+        )
+        self.metrics_history = []
 
         # Setup distributed
         self.rank, self.local_rank, self.world_size = setup_distributed()
@@ -548,9 +564,19 @@ class Stage1Trainer:
                 text_pooled = (text_embeds * attention_mask.unsqueeze(-1)).sum(dim=1) / \
                               attention_mask.sum(dim=1, keepdim=True).clamp(min=1)
 
-                # Contrastive metrics
-                _, metrics = self.contrastive_loss(image_pooled, text_pooled)
-                eval_metrics.update(metrics)
+                # Normalize features for metric computation
+                image_features = F.normalize(image_pooled, dim=-1)
+                text_features = F.normalize(text_pooled, dim=-1)
+                
+                # Compute enhanced metrics (top-5, MRR, similarity distribution)
+                enhanced_metrics = compute_enhanced_contrastive_metrics(
+                    image_features, text_features, temperature=0.07
+                )
+                eval_metrics.update(enhanced_metrics)
+                
+                # Also compute loss for backward compatibility
+                _, loss_metrics = self.contrastive_loss(image_pooled, text_pooled)
+                eval_metrics.update({k: v for k, v in loss_metrics.items() if 'loss' in k})
 
         avg_metrics = eval_metrics.get_average()
         avg_metrics = {f'val_{k}': v for k, v in avg_metrics.items()}
@@ -603,11 +629,37 @@ class Stage1Trainer:
                 self.train_epoch(epoch)
 
                 # Validation at end of epoch
+                val_metrics = {}
+                improved = False
                 if self.val_dataloader is not None:
-                    self.evaluate()
+                    val_metrics = self.evaluate()
+                    
+                    # Track metrics history
+                    self.metrics_history.append(val_metrics)
+                    
+                    # Compute monitoring metric: average of top-5 retrieval accuracies
+                    monitor_metric = (
+                        val_metrics.get('val_acc_i2t_top5', 0.0) +
+                        val_metrics.get('val_acc_t2i_top5', 0.0)
+                    ) / 2.0
+                    
+                    # Check early stopping
+                    improved = self.early_stopping(monitor_metric, epoch)
+                    
+                    if improved:
+                        # Save best checkpoint
+                        checkpoint_path = str(Path(self.config.output_dir) / f'checkpoint-epoch-{epoch+1}')
+                        self.save_checkpoint()
+                        self.best_checkpoint_tracker.update(monitor_metric, checkpoint_path)
+                    
+                    # Check if we should stop
+                    if self.early_stopping.early_stop:
+                        logger.info(f"🛑 Early stopping at epoch {epoch+1}")
+                        break
 
-                # Save at end of epoch
-                self.save_checkpoint()
+                # Save at end of epoch (regular checkpoint)
+                if not improved:
+                    self.save_checkpoint()
 
                 # Push to HuggingFace Hub after each epoch
                 if is_main_process() and self.hub_repo_id:
@@ -637,6 +689,12 @@ class Stage1Trainer:
                         logger.warning(f"Failed to push to HuggingFace Hub: {e}")
 
                 barrier()
+            
+            # Log training summary
+            if is_main_process():
+                log_stage_summary("Stage 1: Visual-Language Alignment", self.metrics_history)
+                logger.info(f"✅ Stage 1 training completed: {len(self.metrics_history)}/{num_epochs} epochs")
+                logger.info(f"   Best checkpoint: {self.best_checkpoint_tracker.load_best_checkpoint()}")
 
         except Exception as e:
             # Log error to WandB before crashing

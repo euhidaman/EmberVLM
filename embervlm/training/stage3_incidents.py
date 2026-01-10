@@ -39,8 +39,7 @@ from embervlm.training.train_utils import (
 from embervlm.data.robot_loader import get_robot_selection_dataloader
 from embervlm.training.robot_metrics import RobotSelectionMetrics, ReasoningQualityMetrics
 from embervlm.monitoring.wandb_logger import EnhancedWandbLogger
-from embervlm.monitoring.carbon_tracker import CarbonTracker
-
+from embervlm.monitoring.carbon_tracker import CarbonTrackerfrom embervlm.training.early_stopping import EarlyStopping, BestCheckpointTracker, log_stage_summary
 logger = logging.getLogger(__name__)
 
 # Try to import stage visualizer
@@ -71,6 +70,20 @@ class Stage3Trainer:
         self.hub_repo_id = hub_repo_id
         self.vision_backbone = vision_backbone
         self.language_backbone = language_backbone
+
+        # Early stopping: monitor macro F1 (higher is better)
+        self.early_stopping = EarlyStopping(
+            patience=5,
+            mode='max',
+            min_delta=0.01,
+            verbose=True
+        )
+        self.best_checkpoint_tracker = BestCheckpointTracker(
+            save_dir=config.output_dir,
+            metric_name='val_macro_f1',
+            mode='max'
+        )
+        self.metrics_history = []
 
         # Setup distributed
         self.rank, self.local_rank, self.world_size = setup_distributed()
@@ -787,10 +800,30 @@ class Stage3Trainer:
                 self.train_epoch(epoch)
 
                 # Evaluate after each epoch
+                val_metrics = {}
+                improved = False
                 if self.val_dataloader is not None:
                     val_metrics = self.evaluate()
-                else:
-                    val_metrics = {}
+                    
+                    # Track metrics history
+                    self.metrics_history.append(val_metrics)
+                    
+                    # Monitor macro F1 (higher is better)
+                    monitor_metric = val_metrics.get('macro_f1', 0.0)
+                    
+                    # Check early stopping
+                    improved = self.early_stopping(monitor_metric, epoch)
+                    
+                    if improved:
+                        # Save best checkpoint
+                        checkpoint_path = str(Path(self.config.output_dir) / f'checkpoint-epoch-{epoch+1}')
+                        self.save_checkpoint()
+                        self.best_checkpoint_tracker.update(monitor_metric, checkpoint_path)
+                    
+                    # Check if we should stop
+                    if self.early_stopping.early_stop:
+                        logger.info(f"🛑 Early stopping at epoch {epoch+1}")
+                        break
 
                 # Push to HuggingFace Hub after each epoch
                 if is_main_process() and self.hub_repo_id:
@@ -826,8 +859,15 @@ class Stage3Trainer:
 
                 barrier()
 
-            # Final save
-            self.save_checkpoint()
+            # Final save (if not already saved as best)
+            if not improved:
+                self.save_checkpoint()
+            
+            # Log training summary
+            if is_main_process():
+                log_stage_summary("Stage 3: Robot Fleet Selection", self.metrics_history)
+                logger.info(f"✅ Stage 3 training completed: {len(self.metrics_history)}/{robot_epochs} epochs")
+                logger.info(f"   Best checkpoint: {self.best_checkpoint_tracker.load_best_checkpoint()}")
 
         finally:
             if is_main_process():

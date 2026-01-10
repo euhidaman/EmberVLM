@@ -39,6 +39,7 @@ from embervlm.training.train_utils import (
 from embervlm.data.loaders import get_instruction_dataloader
 from embervlm.monitoring.wandb_logger import EnhancedWandbLogger
 from embervlm.monitoring.carbon_tracker import CarbonTracker
+from embervlm.training.early_stopping import EarlyStopping, BestCheckpointTracker, log_stage_summary
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +153,20 @@ class Stage2Trainer:
         self.hub_repo_id = hub_repo_id
         self.vision_backbone = vision_backbone
         self.language_backbone = language_backbone
+
+        # Early stopping: monitor perplexity (lower is better)
+        self.early_stopping = EarlyStopping(
+            patience=3,
+            mode='min',
+            min_delta=0.1,
+            verbose=True
+        )
+        self.best_checkpoint_tracker = BestCheckpointTracker(
+            save_dir=config.output_dir,
+            metric_name='val_perplexity',
+            mode='min'
+        )
+        self.metrics_history = []
 
         # Setup distributed
         self.rank, self.local_rank, self.world_size = setup_distributed()
@@ -615,6 +630,11 @@ class Stage2Trainer:
             })
 
         avg_metrics = eval_metrics.get_average()
+        
+        # Calculate perplexity from average loss
+        perplexity = torch.exp(torch.tensor(avg_metrics['loss'])).item()
+        avg_metrics['perplexity'] = perplexity
+        
         avg_metrics = {f'val_{k}': v for k, v in avg_metrics.items()}
 
         if is_main_process():
@@ -664,10 +684,34 @@ class Stage2Trainer:
 
                 self.train_epoch(epoch)
 
+                val_metrics = {}
+                improved = False
                 if self.val_dataloader is not None:
-                    self.evaluate()
+                    val_metrics = self.evaluate()
+                    
+                    # Track metrics history
+                    self.metrics_history.append(val_metrics)
+                    
+                    # Monitor perplexity (lower is better)
+                    monitor_metric = val_metrics.get('val_perplexity', float('inf'))
+                    
+                    # Check early stopping
+                    improved = self.early_stopping(monitor_metric, epoch)
+                    
+                    if improved:
+                        # Save best checkpoint
+                        checkpoint_path = str(Path(self.config.output_dir) / f'checkpoint-epoch-{epoch+1}')
+                        self.save_checkpoint()
+                        self.best_checkpoint_tracker.update(monitor_metric, checkpoint_path)
+                    
+                    # Check if we should stop
+                    if self.early_stopping.early_stop:
+                        logger.info(f"🛑 Early stopping at epoch {epoch+1}")
+                        break
 
-                self.save_checkpoint()
+                # Save regular checkpoint if not best
+                if not improved:
+                    self.save_checkpoint()
                 
                 # Push to HuggingFace Hub after each epoch
                 if is_main_process() and self.hub_repo_id:
@@ -696,6 +740,12 @@ class Stage2Trainer:
                         logger.warning(f"Failed to push to HuggingFace Hub: {e}")
                 
                 barrier()
+            
+            # Log training summary
+            if is_main_process():
+                log_stage_summary("Stage 2: Instruction Tuning", self.metrics_history)
+                logger.info(f"✅ Stage 2 training completed: {len(self.metrics_history)}/{num_epochs} epochs")
+                logger.info(f"   Best checkpoint: {self.best_checkpoint_tracker.load_best_checkpoint()}")
 
         except Exception as e:
             # Log error to WandB before crashing

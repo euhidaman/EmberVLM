@@ -37,6 +37,7 @@ from embervlm.training.train_utils import (
 )
 from embervlm.training.stage1_align import run_stage1_training
 from embervlm.training.stage2_instruct import run_stage2_training
+from embervlm.training.stage2_5_eval import run_stage2_5_evaluation
 from embervlm.training.stage3_incidents import run_stage3_training
 from embervlm.training.stage4_reasoning import run_stage4_training
 from embervlm.monitoring.wandb_logger import WandbLogger
@@ -690,6 +691,78 @@ def run_all_stages(args: argparse.Namespace):
                 logger.warning(
                     f"Stage 2 data not found at {stage2_data_path}, skipping...")
 
+        # Stage 2.5: VLM Benchmark Evaluation (NEW)
+        if args.stage in ['all', '2'] and (args.run_benchmarks and not args.skip_benchmarks):
+            logger.info("="*60)
+            logger.info("STAGE 2.5: VLM BENCHMARK EVALUATION")
+            logger.info("="*60)
+            
+            # Get best checkpoint from Stage 2
+            stage2_dir = output_dir / 'stage2'
+            best_checkpoint_marker = stage2_dir / 'best_checkpoint_path.txt'
+            
+            if best_checkpoint_marker.exists():
+                with open(best_checkpoint_marker, 'r') as f:
+                    checkpoint_path = f.read().strip()
+                logger.info(f"Using best Stage 2 checkpoint: {checkpoint_path}")
+            else:
+                # Fall back to latest checkpoint
+                checkpoint_path = find_latest_checkpoint(stage2_dir)
+                if checkpoint_path:
+                    logger.info(f"Using latest Stage 2 checkpoint: {checkpoint_path}")
+                else:
+                    logger.warning("No Stage 2 checkpoint found, using current model")
+                    checkpoint_path = None
+            
+            # Run benchmark evaluation
+            try:
+                passed, results_summary = run_stage2_5_evaluation(
+                    model_path=str(checkpoint_path) if checkpoint_path else str(stage2_dir),
+                    output_dir=str(output_dir),
+                    preset=args.benchmark_preset,
+                    threshold_mode=args.quality_threshold,
+                    vlmeval_repo=args.vlmeval_repo,
+                )
+                
+                # Log results to WandB if available
+                if rank == 0 and carbon_tracker:
+                    try:
+                        import wandb
+                        wandb.log({
+                            'stage2_5_benchmarks': results_summary['benchmarks'],
+                            'stage2_5_aggregate_score': results_summary['aggregate_score'],
+                            'stage2_5_quality_passed': passed,
+                        })
+                    except Exception as e:
+                        logger.warning(f"Failed to log to WandB: {e}")
+                
+                # Check quality threshold (if not 'skip' mode)
+                if args.quality_threshold != 'skip' and not passed:
+                    logger.error("="*80)
+                    logger.error("❌ VLM QUALITY CHECK FAILED")
+                    logger.error("="*80)
+                    logger.error("The model did not meet the minimum quality threshold.")
+                    logger.error("Recommendations:")
+                    logger.error("  1. Increase Stage 1 epochs (--stage1_epochs)")
+                    logger.error("  2. Increase Stage 2 epochs (--stage2_epochs)")
+                    logger.error("  3. Use distillation (future feature)")
+                    logger.error("  4. Adjust quality threshold (--quality_threshold permissive)")
+                    logger.error("="*80)
+                    
+                    # Stop training
+                    logger.info("Stopping training due to quality check failure")
+                    return model
+                else:
+                    logger.info("="*80)
+                    logger.info("✅ VLM QUALITY CHECK PASSED")
+                    logger.info("="*80)
+                    logger.info("Proceeding to robot-specific training stages...")
+                    
+            except Exception as e:
+                logger.error(f"Benchmark evaluation failed: {e}")
+                if args.quality_threshold != 'skip':
+                    logger.warning("Proceeding with training despite evaluation failure")
+
         # Clean up and sync before Stage 3
         if args.stage in ['all', '3']:
             import torch.distributed as dist
@@ -1037,9 +1110,9 @@ def main():
                         help='Path to reasoning augmented data')
 
     # Stage-specific epochs
-    parser.add_argument('--stage1_epochs', type=int, default=3)
+    parser.add_argument('--stage1_epochs', type=int, default=7)
     parser.add_argument('--stage1_steps', type=int, default=10000)
-    parser.add_argument('--stage2_epochs', type=int, default=5)
+    parser.add_argument('--stage2_epochs', type=int, default=10)
     parser.add_argument('--stage2_steps', type=int, default=15000)
     parser.add_argument('--stage3_robot_epochs', type=int, default=20)
     parser.add_argument('--stage3_steps', type=int, default=20000)
@@ -1054,6 +1127,21 @@ def main():
                         '{username}/embervlm-small (--size small). '
                         'Requires HF_TOKEN environment variable. '
                         'Set DISABLE_HUB_PUSH=1 to skip pushing.')
+
+    # VLM Benchmark Evaluation (Stage 2.5)
+    parser.add_argument('--run_benchmarks', action='store_true', default=False,
+                        help='Run VLM benchmarks after Stage 2')
+    parser.add_argument('--skip_benchmarks', action='store_true',
+                        help='Explicitly skip VLM benchmark evaluation (same as not using --run_benchmarks)')
+    parser.add_argument('--benchmark_preset', type=str, default='standard',
+                        choices=['quick', 'standard', 'full'],
+                        help='Benchmark suite: quick (~30min), standard (~1-2hr), full (~4-6hr)')
+    parser.add_argument('--quality_threshold', type=str, default='auto',
+                        choices=['strict', 'standard', 'permissive', 'auto', 'skip'],
+                        help='Quality threshold for VLM: strict (85%%), standard (70%%), '
+                        'permissive (50%%), auto (65%%), skip (no gating)')
+    parser.add_argument('--vlmeval_repo', type=str, default='d:\\BabyLM\\VLMEvalKit',
+                        help='Path to VLMEvalKit repository')
 
     # Resume from checkpoint
     parser.add_argument('--resume_from_checkpoint', type=str, default=None,
