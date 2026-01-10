@@ -44,7 +44,7 @@ def main():
         try:
             subprocess.run("apt-get update -qq", shell=True, check=False, capture_output=True)
             result = subprocess.run(
-                "apt-get install -y -qq libgl1-mesa-glx libglib2.0-0",
+                "apt-get install -y --fix-missing libgl1-mesa-glx libglib2.0-0",
                 shell=True,
                 check=False,
                 capture_output=True,
@@ -54,14 +54,23 @@ def main():
                 print("   ✅ System dependencies installed")
             else:
                 print("   ⚠️  Could not auto-install system dependencies")
-                print("   Please run: sudo apt-get install -y libgl1-mesa-glx libglib2.0-0")
-                print("   Then run this script again.")
-                sys.exit(1)
+                print("   Trying with just libgl1...")
+                result2 = subprocess.run(
+                    "apt-get install -y --fix-missing libgl1",
+                    shell=True,
+                    check=False,
+                    capture_output=True,
+                    text=True
+                )
+                if result2.returncode == 0:
+                    print("   ✅ Installed libgl1 successfully")
+                else:
+                    print("   ⚠️  System dependency installation had issues, but continuing...")
+                    print("   If you see OpenCV errors, run: sudo apt-get install -y --fix-missing libgl1-mesa-glx")
         except Exception as e:
-            print(f"   ⚠️  Error: {e}")
-            print("   Please run: sudo apt-get install -y libgl1-mesa-glx libglib2.0-0")
-            print("   Then run this script again.")
-            sys.exit(1)
+            print(f"   ⚠️  Warning: {e}")
+            print("   Continuing anyway - if you see OpenCV errors, run:")
+            print("   sudo apt-get install -y --fix-missing libgl1-mesa-glx")
 
     # Check if VLMEvalKit directory exists
     vlmeval_path = Path("../VLMEvalKit")
