@@ -39,7 +39,9 @@ from embervlm.training.train_utils import (
 from embervlm.data.robot_loader import get_robot_selection_dataloader
 from embervlm.training.robot_metrics import RobotSelectionMetrics, ReasoningQualityMetrics
 from embervlm.monitoring.wandb_logger import EnhancedWandbLogger
-from embervlm.monitoring.carbon_tracker import CarbonTrackerfrom embervlm.training.early_stopping import EarlyStopping, BestCheckpointTracker, log_stage_summary
+from embervlm.monitoring.carbon_tracker import CarbonTracker
+from embervlm.training.early_stopping import EarlyStopping, BestCheckpointTracker, log_stage_summary
+
 logger = logging.getLogger(__name__)
 
 # Try to import stage visualizer
