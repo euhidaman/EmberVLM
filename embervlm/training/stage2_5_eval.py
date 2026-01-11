@@ -221,11 +221,71 @@ QUALITY_THRESHOLDS = {
 }
 
 
+def _run_benchmark_direct(model_path: str, benchmark: str, output_dir: str) -> Optional[float]:
+    """
+    Run benchmark using VLMEvalKit Python API directly.
+    
+    Args:
+        model_path: Path to EmberVLM checkpoint
+        benchmark: Benchmark name
+        output_dir: Output directory
+        
+    Returns:
+        Score or None if failed
+    """
+    try:
+        from embervlm.evaluation.vlmevalkit_adapter import EmberVLM_VLMEval
+        from vlmeval.config import supported_VLM
+        from vlmeval.utils import  build_judge
+        import vlmeval
+        
+        logger.info(f"Running {benchmark} using Python API...")
+        
+        # Initialize EmberVLM model for VLMEvalKit
+        model = EmberVLM_VLMEval(model_path=model_path)
+        
+        # Import dataset
+        dataset_module = __import__(f'vlmeval.dataset', fromlist=[benchmark])
+        dataset_class = getattr(dataset_module, benchmark.split('_')[0])
+        dataset = dataset_class(dataset=benchmark)
+        
+        # Run evaluation
+        results = []
+        for idx in range(len(dataset)):
+            item = dataset[idx]
+            response = model.generate(item['image'], item['question'])
+            results.append({
+                'question_id': item.get('index', idx),
+                'answer': response
+            })
+        
+        # Calculate accuracy (simplified)
+        if hasattr(dataset, 'evaluate'):
+            score = dataset.evaluate(results)
+        else:
+            # Simple accuracy for yes/no or MCQ
+            correct = sum(1 for r, item in zip(results, dataset) 
+                         if r['answer'].strip().lower() == item.get('answer', '').strip().lower())
+            score = (correct / len(results)) * 100 if results else 0.0
+        
+        logger.info(f"✓ {benchmark}: {score:.2f}%")
+        return score
+        
+    except ImportError as e:
+        logger.error(f"Missing dependency for direct evaluation: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Direct benchmark failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
 def run_vlmevalkit_eval(
     model_path: str,
     benchmark: str,
     output_dir: str,
-    vlmeval_repo: str = "d:\\BabyLM\\VLMEvalKit"
+    vlmeval_repo: str = None
 ) -> Optional[float]:
     """
     Run single benchmark using VLMEvalKit.
@@ -239,10 +299,42 @@ def run_vlmevalkit_eval(
     Returns:
         Score (float) or None if failed
     """
+    # Auto-detect VLMEvalKit path if not provided
+    if vlmeval_repo is None:
+        import sys
+        import os
+        if sys.platform.startswith('win'):
+            vlmeval_repo = "d:\\BabyLM\\VLMEvalKit"
+        else:
+            # Linux/Unix: try common locations
+            for candidate in ["/root/VLMEvalKit", "../VLMEvalKit", str(Path.home() / "VLMEvalKit")]:
+                if Path(candidate).exists():
+                    vlmeval_repo = str(Path(candidate).resolve())
+                    break
+            else:
+                vlmeval_repo = "/root/VLMEvalKit"  # Default
+    
+    # Convert to absolute path
+    vlmeval_repo = str(Path(vlmeval_repo).resolve())
+    
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
     logger.info(f"Running {benchmark}...")
+    logger.info(f"VLMEvalKit repo: {vlmeval_repo}")
+    
+    # Check if VLMEvalKit exists
+    run_script = Path(vlmeval_repo) / "run.py"
+    if not run_script.exists():
+        logger.error(f"VLMEvalKit run.py not found at: {run_script}")
+        logger.warning(f"Using direct Python API instead of CLI")
+        
+        # Try using VLMEvalKit Python API directly
+        try:
+            return _run_benchmark_direct(model_path, benchmark, output_dir)
+        except Exception as e:
+            logger.error(f"Direct benchmark execution failed: {e}")
+            return None
     
     try:
         # Prepare VLMEvalKit command
@@ -425,7 +517,8 @@ def run_stage2_5_evaluation(
     output_dir: str,
     preset: str = 'standard',
     threshold_mode: str = 'auto',
-    vlmeval_repo: str = "d:\\BabyLM\\VLMEvalKit",
+    vlmeval_repo: str = None,
+    skip_on_error: bool = True,
 ) -> Tuple[bool, Dict]:
     """
     Run Stage 2.5 VLM benchmark evaluation.
